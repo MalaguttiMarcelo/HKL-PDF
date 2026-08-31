@@ -24,15 +24,15 @@ cyl_axis_l = 1.0
 
 For pair length $L$ and angle $\phi$ to the axis,
 
-$
+$$
 z=L|\cos\phi|,
 \qquad
 r_\perp=L|\sin\phi|.
-$
+$$
 
 The radial overlap is
 
-$
+$$
 \gamma_{\mathrm{radial}}=
 \frac{2}{\pi}
 \left[
@@ -40,22 +40,22 @@ $
 \right],
 \qquad
 x=\frac{r_\perp}{D}.
-$
+$$
 
 For thickness $T$,
 
-$
+$$
 \gamma_{\mathrm{axial}}=
 \max\left(1-\frac{z}{T},0\right).
-$
+$$
 
 The total common-volume factor is
 
-$
+$$
 \gamma_{\mathrm{cyl}}=
 \gamma_{\mathrm{radial}}
 \gamma_{\mathrm{axial}}.
-$
+$$
 
 ## Thickness distribution
 

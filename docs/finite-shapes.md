@@ -75,22 +75,22 @@ must be inside the particle.
 
 ## Finite effective coordination
 
-$
-m_{\mathrm{finite}}^{\mathrm{eff}}=
+$$
+m_{\mathrm{finite}}^{\mathrm{eff}} =
 \frac{N_{\mathrm{finite\ pairs}}}
 {N_{\alpha,\mathrm{inside}}}.
-$
+$$
 
 The finite baseline ratio is
 
-$
-\gamma_{\mathrm{finite}}=
+$$
+\gamma_{\mathrm{finite}} =
 \frac{
 m_{\mathrm{finite}}^{\mathrm{eff}}
 }{
 m_{\mathrm{bulk}}^{\mathrm{eff}}
 }.
-$
+$$
 
 Finite coordination controls peak amplitudes. The gamma ratio controls the
 finite-particle baseline.

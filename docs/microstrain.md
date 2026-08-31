@@ -16,9 +16,9 @@ delta_g = 0.001
 
 The variance contribution is
 
-$
+$$
 \sigma_g^2=(\delta_gL)^2.
-$
+$$
 
 This model has no crystallographic direction dependence.
 
@@ -37,19 +37,19 @@ burgers_mag = 2.5
 
 The model uses
 
-$
-\langle\varepsilon^2(L)\rangle=
+$$
+\left\langle\varepsilon^2(L)\right\rangle =
 \frac{\rho b^2}{4\pi}
 C_{hkl}
-f^\ast(L/R_e).
-$
+f^\ast\left(\frac{L}{R_e}\right).
+$$
 
 The peak-variance contribution is
 
-$
-\sigma_{\mathrm{W}}^2=
-L^2\langle\varepsilon^2(L)\rangle.
-$
+$$
+\sigma_{\mathrm{W}}^2 =
+L^2\left\langle\varepsilon^2(L)\right\rangle.
+$$
 
 For cubic materials, contrast factors may use:
 
@@ -77,25 +77,29 @@ fe = 0.5
 
 The implemented variance is
 
-$
-\sigma_{\mathrm{PAH}}^2=
+$$
+\sigma_{\mathrm{PAH}}^2 =
 I_{hkl}
-(a_{\mathrm{PAH}}L+b_{\mathrm{PAH}}L^2).
-$
+\left(
+a_{\mathrm{PAH}}L+b_{\mathrm{PAH}}L^2
+\right).
+$$
 
 ## Warren plot
 
 The Warren view can display
 
-$
-\sqrt{\langle\Delta L^2\rangle}
-$
+$$
+\sqrt{\left\langle\Delta L^2\right\rangle}
+$$
 
 or
 
-$
-\frac{\sqrt{\langle\Delta L^2\rangle}}{L}.
-$
+$$
+\frac{
+\sqrt{\left\langle\Delta L^2\right\rangle}
+}{L}.
+$$
 
 Directions are reduced and grouped according to crystal-system symmetry.
 

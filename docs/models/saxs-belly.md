@@ -28,12 +28,12 @@ saxs_apply_qmax = true
 
 The belly term is
 
-$
+$$
 G_{\mathrm{belly}}(r)=
 -s\,s_{\mathrm{SAXS}}\,
 4\pi\rho_0r\,
 \gamma_{\mathrm{SAXS}}(r).
-$
+$$
 
 ## Independent dimensions
 

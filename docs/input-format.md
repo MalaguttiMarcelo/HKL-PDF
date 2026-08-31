@@ -31,9 +31,10 @@ r_extension = 1.2
 
 The shell-generation cutoff is approximately
 
-$
-r_{\mathrm{cut}}=r_{\max}r_{\mathrm{extension}}.
-$
+$$
+r_{\mathrm{cut}} =
+r_{\max}r_{\mathrm{extension}}.
+$$
 
 A larger value generates more pairs and requires more memory.
 

@@ -52,22 +52,22 @@ inside the particle.
 
 The effective finite multiplicity is
 
-$
+$$
 m_{\mathrm{finite}}^{\mathrm{eff}}=
 \frac{N_{\mathrm{finite\ pairs}}}
 {N_{\alpha,\mathrm{inside}}}.
-$
+$$
 
 ## Baseline gamma
 
-$
+$$
 \gamma_{\mathrm{finite}}=
 \frac{
 m_{\mathrm{finite}}^{\mathrm{eff}}
 }{
 m_{\mathrm{bulk}}^{\mathrm{eff}}
 }.
-$
+$$
 
 Peak amplitudes use finite coordination directly. Gamma is used for the
 finite-particle baseline.

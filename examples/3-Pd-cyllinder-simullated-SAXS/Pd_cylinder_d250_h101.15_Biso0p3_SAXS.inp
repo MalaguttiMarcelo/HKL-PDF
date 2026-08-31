@@ -50,12 +50,18 @@ saxs_diameter_std = 0.0
 saxs_height = 0.0
 saxs_height_std = 0.0
 delta_g = 0.0
-cyl_diameter = 189.88674471622278
-cyl_thickness = 125.23731045807084
-cyl_thickness_std = 0.0
-cyl_axis_h = 0.0
-cyl_axis_k = 0.0
-cyl_axis_l = 1.0
+occ_c = 1.0
+occ_ca = 1.0
+occ_o = 1.0
+x_c = 0.0
+x_ca = 0.0
+x_o = 0.25992
+y_c = 0.0
+y_ca = 0.0
+y_o = 0.0
+z_c = 0.25
+z_ca = 0.0
+z_o = 0.25
 
 [refinable_parameters]
 scale = true
@@ -80,12 +86,21 @@ saxs_diameter_std = false
 saxs_height = false
 saxs_height_std = false
 delta_g = false
-cyl_diameter = true
-cyl_thickness = true
-cyl_thickness_std = false
-cyl_axis_h = false
-cyl_axis_k = false
-cyl_axis_l = false
+delta1_c-ca = false
+delta1_c-o = false
+delta1_o-o = false
+occ_c = false
+occ_ca = false
+occ_o = false
+x_c = false
+x_ca = false
+x_o = false
+y_c = false
+y_ca = false
+y_o = false
+z_c = false
+z_ca = false
+z_o = false
 
 [bounds]
 biso_Pd = 0, 10
@@ -93,5 +108,5 @@ biso_Pd = 0, 10
 [constraints]
 
 [crystallite_shape]
-mode = conventional
+mode = finite_shape
 

@@ -53,17 +53,17 @@ search.
 
 For a real-space mean $\bar D$ and standard deviation $s_D$,
 
-$
-\sigma_{\ln}^{2}=
+$$
+\sigma_{\ln}^{2} =
 \ln\left(
 1+\frac{s_D^2}{\bar D^2}
 \right),
-$
+$$
 
-$
-\mu_{\ln}=
+$$
+\mu_{\ln} =
 \ln(\bar D)-\frac{\sigma_{\ln}^{2}}{2}.
-$
+$$
 
 A zero standard deviation represents a monodisperse size.
 

@@ -23,27 +23,27 @@ trial.
 
 For a shell,
 
-$
+$$
 g_{\alpha\beta}^{(ij)}(r)=
 \frac{m_{ij}}
 {4\pi r_{ij}^2\rho_\beta}
 N(r;r_{ij},\sigma_{ij}),
-$
+$$
 
 where $N$ is a normalized Gaussian.
 
 ## Total PDF
 
-$
+$$
 g(r)=
 \sum_{\alpha,\beta}
 w_{\alpha\beta}g_{\alpha\beta}(r),
-$
+$$
 
-$
+$$
 G(r)=
 s\,4\pi\rho_0r[g(r)-1].
-$
+$$
 
 An analytical shape envelope may modify both the peak contribution and the
 negative baseline.

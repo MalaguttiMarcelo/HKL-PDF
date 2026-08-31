@@ -101,9 +101,9 @@ Default safety bounds are 0–10 Å².
 
 If `burgers_mag` is absent, the compatibility default is
 
-$
+$$
 b=\frac{\sqrt{3}}{2}a.
-$
+$$
 
 Provide `burgers_mag` when this assumption is not appropriate.
 

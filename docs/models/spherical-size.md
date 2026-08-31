@@ -7,26 +7,26 @@ separated by distance $r$.
 
 For diameter $D$,
 
-$
+$$
 \gamma(r)=
 1-\frac{3r}{2D}
 +\frac{r^3}{2D^3},
 \qquad r<D,
-$
+$$
 
 and
 
-$
+$$
 \gamma(r)=0,\qquad r\ge D.
-$
+$$
 
 The PDF is
 
-$
+$$
 G(r)=
 s\,4\pi\rho_0r\,
 \gamma(r)[g(r)-1].
-$
+$$
 
 ## Input
 

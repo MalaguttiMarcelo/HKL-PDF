@@ -27,12 +27,12 @@ saxs_apply_qmax = true
 
 The independent belly term is
 
-$
+$$
 G_{\mathrm{SAXS}}(r)=
 -s\,s_{\mathrm{SAXS}}\,
 4\pi\rho_0r\,
 \gamma_{\mathrm{SAXS}}(r).
-$
+$$
 
 ## Sphere model
 
