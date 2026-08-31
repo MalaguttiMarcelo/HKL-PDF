@@ -1,0 +1,66 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/config/Calcite.cif
+gr_data_file = 
+
+[range]
+r_min = 1.0
+r_max = 10.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 1.0
+a = 4.9889
+b = 4.9889
+c = 17.073
+alpha = 90.0
+beta = 90.0
+gamma = 120.00000000000001
+qdamp = 0.04
+delta_broad = 0.0
+qmax = 0.0
+d = 50.0
+d_std = 0.2
+delta_g = 0.0
+biso_c = 2.4
+biso_ca = 1.45
+biso_o = 2.73
+delta1 = 0.0
+delta2 = 0.0
+
+[refinable_parameters]
+scale = false
+a = false
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qdamp = false
+delta_broad = false
+qmax = false
+d = false
+d_std = false
+delta_g = false
+biso_c = false
+biso_ca = false
+biso_o = false
+delta1 = false
+delta2 = false
+
+[bounds]
+
+[contrast_factors]
+
+[constraints]
+

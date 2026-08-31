@@ -1,0 +1,95 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Fe_bcc_300K.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/FeCr_ID31.xy
+
+[range]
+r_min = 2.0
+r_max = 100.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = wilkens
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = true
+compute_local_trends_on_finish = true
+export_finite_coordination = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.26910204673689236
+qdamp = 0.011485099495637478
+delta_broad = 0.0014090180673610453
+qmax = 20.0
+qmax_zeros = 5.0
+a = 2.8684254515569596
+b = 2.8684254515569596
+c = 2.8684254515569596
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+x_fe1 = 0.0
+y_fe1 = 0.0
+z_fe1 = 0.0
+occ_fe1 = 1.0
+rho = 0.00016791741496673617
+re = 179.4567284717888
+fe = 0.6373558032518307
+CEdgeA = 0.26528
+CEdgeB = -0.35595
+CScrewA = 0.307288
+CScrewB = -0.819979
+delta2 = 1.6759715829524633
+biso_fe1 = 0.30958622611300673
+lambda_fe0plus-fe0plus_0 = 0.503
+lambda_fe0plus-fe0plus_1 = 0.071
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+x_fe1 = false
+y_fe1 = false
+z_fe1 = false
+occ_fe1 = false
+rho = true
+re = false
+fe = true
+CEdgeA = false
+CEdgeB = false
+CScrewA = false
+CScrewB = false
+delta2 = true
+biso_fe1 = true
+lambda_fe0plus-fe0plus_0 = true
+lambda_fe0plus-fe0plus_1 = true
+
+[bounds]
+rho = 0.0, 
+fe = 0.0, 1.0
+delta2 = 0.0, 
+biso_fe1 = 0.0, 10.0
+lambda_fe0plus-fe0plus_0 = 0.000, 1.000
+lambda_fe0plus-fe0plus_1 = 0.000, 1.000
+
+[constraints]
+re = d
+
+[crystallite_shape]
+mode = finite_shape
+

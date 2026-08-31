@@ -1,0 +1,32 @@
+site_name: HKL-PDF
+site_description: Graphical pair distribution function fitting and crystallite-shape analysis
+site_url: https://malaguttimarcelo.github.io/HKL-PDF/
+repo_url: https://github.com/MalaguttiMarcelo/HKL-PDF
+repo_name: MalaguttiMarcelo/HKL-PDF
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quick start: quick-start.md
+  - Input format: input-format.md
+  - Models:
+      - Conventional fitting: models/conventional.md
+      - Spherical size: models/spherical-size.md
+      - Cylinder and disk: models/cylinder-disk.md
+      - SAXS belly: models/saxs-belly.md
+      - Finite shape: models/finite-shape.md
+      - Microstrain: models/microstrain.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js

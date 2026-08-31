@@ -1,0 +1,70 @@
+[files]
+structure_file = data/LaB6.cif
+gr_data_file = data/Gofr_LaB6_8nm_Sphere_Element1Biso_0_3_Element2Biso_0_3.xy
+
+
+[range]
+r_min = 1
+r_max = 10
+
+[initial_values]
+scale = 1
+biso_La = 0.3
+biso_B = 0.3
+delta_g = 0
+delta_broad = 0
+delta1 = 0
+delta2 = 0.0
+eta = 0
+qdamp = 0
+a = 4.1569162
+d = 80
+d_std = 0
+rho = 0
+Re =  105
+fE = 0.500000
+
+
+[refinable_parameters]
+scale = False
+biso_La = False
+biso_B = False
+delta_g = False
+delta_broad = False
+delta1 = False
+delta2 = False
+qdamp = False
+eta = False
+a = False
+d = False
+d_std = False
+rho = False
+Re =  False
+fE =  False
+
+
+[bounds]
+scale = 0, 10.0
+biso_La = 0, 2
+biso_B = 0, 2
+delta_g = 0.0, 0.1
+delta_broad = 0.0, 0.1
+delta1 = 0.0, 2.0
+delta2 = 0.0, 5.0
+qdamp = 0.0, 2
+eta = 0.0, 1.0
+a = 2.80, 3.0
+d = 5.0, 10000
+d_std = 0.0, 1000
+rho = 0, 0.1
+Re = 5, 500
+fE = 0, 1
+
+[pair_generation]
+r_extension = 1.2
+
+[contrast_factors]
+CEdgeA = 0.265280
+CEdgeB = -0.355950
+CScrewA = 0.307288
+CScrewB = -0.819979

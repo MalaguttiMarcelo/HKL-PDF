@@ -1,0 +1,101 @@
+
+[files]
+structure_file = data/Fe_bcc_300K.cif
+gr_data_file = data/FeCr_ID31.xy
+
+[structure]
+structure = bcc 
+
+[range]
+r_min = 1.0
+r_max = 50
+
+[initial_values]
+scale = 0.258406
+biso = 0.32751171
+delta_g = 0
+delta_broad = 0.0273703781
+delta1 = 0
+delta2 = 0.0
+qdamp = 0.0291082607
+a = 2.8686
+d = 100
+d_var = 50
+rho = 0.00028
+Re =  100
+fE = 0.500000
+lambda_0 = 0.365141
+lambda_1 = 0.208486
+lambda_2 = 0.142777
+lambda_3 = 0.060066
+lambda_4 = 0.209595
+lambda_5 = 0.015306
+lambda_6 = 0.077221
+lambda_7 = 0.040683
+lambda_8 = 0.021904
+lambda_9 = 0.023439
+lambda_10 = 0.021117
+lambda_11 = 0.004548
+
+[refinable_parameters]
+scale = False
+biso = False
+delta_g = False
+delta_broad = False
+delta1 = False
+delta2 = False
+qdamp = False
+a = False
+d = False
+d_var = False
+rho = False
+Re =  False
+fE =  False
+lambda_0 =  False
+lambda_1 =  False
+lambda_2 =  False
+lambda_3 =  False
+lambda_4 =  False
+lambda_5 =  False
+lambda_6 =  False
+lambda_7 =  False
+lambda_8 =  False
+lambda_9 =  False
+lambda_10 = False
+lambda_11 = False
+
+[bounds]
+scale = 0.1, 10.0
+biso = 0.0, 5.0
+delta_g = 0.0, 0.1
+delta_broad = 0.0, 0.1
+delta1 = 0.0, 2.0
+delta2 = 0.0, 5.0
+qdamp = 0.0, 2
+a = 2.0, 4.0
+d = 5.0, 200.0
+d_var = 0.0, 60.0
+rho = 0, 0.1
+Re = 5, 500
+fE = 0, 1
+lambda_0 =  0 , 1
+lambda_1 =  0 , 1
+lambda_2 =  0 , 1
+lambda_3 =  0 , 1
+lambda_4 =  0 , 1
+lambda_5 =  0 , 1
+lambda_6 =  0 , 1
+lambda_7 =  0 , 1
+lambda_8 =  0 , 1
+lambda_9 =  0 , 1
+lambda_10 = 0 , 1
+lambda_11 = 0 , 1
+
+[pair_generation]
+r_extension = 1.2
+
+[contrast_factors]
+CEdgeA = 0.265280
+CEdgeB = -0.355950
+CScrewA = 0.307288
+CScrewB = -0.819979

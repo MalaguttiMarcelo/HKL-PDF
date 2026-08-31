@@ -1,0 +1,97 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/config/Pd.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/cylinder_d250_h101.15_Biso0p3_SAXS.xy
+
+[range]
+r_min = 2.0
+r_max = 200.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = isotropic
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = false
+compute_local_trends_on_finish = false
+export_finite_coordination = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+saxs_enabled = true
+saxs_model = same_as_size_model
+saxs_apply_qdamp = false
+saxs_apply_qmax = false
+
+[initial_values]
+scale = 0.050048571716577554
+a = 3.8905556870149756
+b = 3.8905556870149756
+c = 3.8905556870149756
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+x_pd1 = 0.0
+y_pd1 = 0.0
+z_pd1 = 0.0
+occ_pd1 = 1.0
+biso_Pd = 0.3
+qdamp = 0.0
+delta_broad = 0.0
+qmax = 40.0
+qmax_zeros = 5.0
+saxs_scale = 1.0
+saxs_diameter = 0.0
+saxs_diameter_std = 0.0
+saxs_height = 0.0
+saxs_height_std = 0.0
+delta_g = 0.0
+cyl_diameter = 189.88674471622278
+cyl_thickness = 125.23731045807084
+cyl_thickness_std = 0.0
+cyl_axis_h = 0.0
+cyl_axis_k = 0.0
+cyl_axis_l = 1.0
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+x_pd1 = false
+y_pd1 = false
+z_pd1 = false
+occ_pd1 = false
+biso_Pd = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+saxs_scale = false
+saxs_diameter = false
+saxs_diameter_std = false
+saxs_height = false
+saxs_height_std = false
+delta_g = false
+cyl_diameter = true
+cyl_thickness = true
+cyl_thickness_std = false
+cyl_axis_h = false
+cyl_axis_k = false
+cyl_axis_l = false
+
+[bounds]
+biso_Pd = 0, 10
+
+[constraints]
+
+[crystallite_shape]
+mode = conventional
+

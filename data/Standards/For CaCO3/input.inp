@@ -1,0 +1,64 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Standards/For CaCO3/Si.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/Standards/For CaCO3/Si.integrated.2th.subtracted_bkg.corr.qmax20.xy
+
+[range]
+r_min = 1.0
+r_max = 200.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.07093974186165111
+a = 5.432099491745967
+b = 5.432099491745967
+c = 5.432099491745967
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+biso_si = 0.3786856628173836
+qdamp = 0.00787114336321576
+delta_broad = 0.0014837841765491856
+qmax = 20.0
+qmax_zeros = 5.0
+d = 0.0
+d_std = 0.0
+delta_g = 0.0
+delta1 = 2.211777542888943
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+biso_si = true
+qdamp = true
+delta_broad = true
+qmax = false
+qmax_zeros = false
+d = False
+d_std = False
+delta_g = False
+delta1 = true
+
+[bounds]
+delta_broad = 0.0, 
+qdamp = 0.0, 
+
+[constraints]
+
+[contrast_factors]
+

@@ -1,0 +1,90 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Fe_bcc_300K.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/FeCr_ID31.xy
+
+[range]
+r_min = 2.0
+r_max = 150.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.2758212719186609
+a = 2.8684345214184472
+b = 2.8684345214184472
+c = 2.8684345214184472
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qdamp = 0.011485099495637478
+delta_broad = 0.0014090180673610453
+qmax = 20.0
+qmax_zeros = 5.0
+biso_fe = 0.3051413519141072
+d = 112.44006012406759
+d_std = 46.92369088671428
+rho = 0.0001958541682853641
+re = 112.44006012406759
+fe = 0.6208505266637726
+delta2 = 1.0044573759747442
+CEdgeA = 0.26528
+CEdgeB = -0.35595
+CScrewA = 0.307288
+CScrewB = -0.819979
+delta1 = 0.0
+lambda_fe0plus-fe0plus_0 = 0.489
+lambda_fe0plus-fe0plus_1 = 0.004
+lambda_fe0plus-fe0plus_2 = 0.102
+lambda_fe0plus-fe0plus_3 = 1e-10
+
+[refinable_parameters]
+scale = True
+a = True
+b = False
+c = False
+alpha = False
+beta = False
+gamma = False
+qdamp = False
+delta_broad = False
+qmax = False
+qmax_zeros = False
+biso_fe = True
+d = True
+d_std = True
+rho = True
+re = False
+fe = True
+delta2 = True
+CEdgeA = False
+CEdgeB = False
+CScrewA = False
+CScrewB = False
+delta1 = False
+lambda_fe0plus-fe0plus_0 = True
+lambda_fe0plus-fe0plus_1 = True
+lambda_fe0plus-fe0plus_2 = True
+lambda_fe0plus-fe0plus_3 = True
+
+[bounds]
+rho = 0.0, 0.1
+fe = 0.0, 1.0
+delta2 = 0.0, 4.0
+lambda_fe0plus-fe0plus_0 = 0.000, 1.000
+lambda_fe0plus-fe0plus_1 = 0.000, 1.000
+lambda_fe0plus-fe0plus_2 = 0.000, 1.000
+lambda_fe0plus-fe0plus_3 = 0.000, 1.000
+
+[constraints]
+re = d
+

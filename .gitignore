@@ -1,0 +1,95 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.nbc
+*.nbi
+
+# Numba and project-generated caches
+pdf_fitting/__pycache__/
+**/__pycache__/
+shells_*.npz
+shells_*.meta.json
+finite_pair_catalog_*.npz
+finite_pair_catalog_*.json
+finite_shape_shells_*.npz
+finite_shape_shells_*.json
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type-checking and linting caches
+.mypy_cache/
+.ruff_cache/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+fit_log.txt
+
+# Generated fitting output
+output/
+outputs/
+results/
+fit_results/
+finite_gamma_functions/
+
+# Local input files that may contain absolute paths
+local*.inp
+local*.ini
+*_local.inp
+*_local.ini
+
+# Large or private experimental data
+data/private/
+data/raw/
+
+# Build environments
+.venv/
+.venv-build/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Installer output
+installer-output/
+
+# User caches
+*.nbc
+*.nbi
+
+# Local backup archives
+/backups/
+*.zip

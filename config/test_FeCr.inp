@@ -1,0 +1,80 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Fe_bcc_300K.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/FeCr_ID31.xy
+
+[range]
+r_min = 1.0
+r_max = 20.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = isotropic
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = true
+compute_local_trends_on_finish = true
+export_finite_coordination = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 1.0
+qdamp = 0.0014090180673610453
+delta_broad = 0.0014090180673610453
+qmax = 20.0
+qmax_zeros = 5.0
+d = 100.0
+d_std = 0.0
+delta_g = 1e-05
+a = 2.868615
+b = 2.868615
+c = 2.868615
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+x_fe1 = 0.0
+y_fe1 = 0.0
+z_fe1 = 0.0
+occ_fe1 = 1.0
+biso_Fe = 0.29
+delta2 = 2.0
+
+[refinable_parameters]
+scale = True
+a = True
+b = False
+c = False
+alpha = False
+beta = False
+gamma = False
+qdamp = False
+delta_broad = False
+qmax = False
+qmax_zeros = False
+d = True
+d_std = False
+delta_g = True
+x_fe1 = False
+y_fe1 = False
+z_fe1 = False
+occ_fe1 = False
+biso_Fe = False
+delta2 = True
+
+[bounds]
+biso_Fe = 0, 10
+scale = 0,
+a = 0,
+delta_g = 0,
+
+[constraints]
+
+[crystallite_shape]
+mode = conventional
+

@@ -1,0 +1,68 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Fe_bcc_300K.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/FeCr_ID31.xy
+
+[range]
+r_min = 1.5
+r_max = 150.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.2641449992398661
+a = 2.868310566938653
+b = 2.868310566938653
+c = 2.868310566938653
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qdamp = 0.00948550267135699
+delta_broad = 0.014591141072870847
+qmax = 25.0
+d = 109.99999999559435
+d_std = 40.33874214797112
+biso_fe = 0.29255206471076495
+qmax_zeros = 100.0
+qbroad = 0.0
+eta = 0.0
+delta_g = 0.0
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qdamp = false
+delta_broad = false
+qmax = false
+d = false
+d_std = false
+biso_fe = false
+qmax_zeros = false
+qbroad = false
+eta = false
+delta_g = false
+
+[bounds]
+d = 0.0, 110.0
+d_std = 0.0,
+qdamp = 0.0, 0.1
+biso_fe = 0.0, 
+
+[constraints]
+
+[contrast_factors]
+

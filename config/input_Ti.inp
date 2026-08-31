@@ -1,0 +1,72 @@
+[files]
+structure_file = G:/Il mio Drive/DICAM/VisualStudio/pdf_fitting_project/data/Ti PDF Card - 00-005-0682.cif
+gr_data_file = G:/Il mio Drive/DICAM/VisualStudio/pdf_fitting_project/data/Ti_20nm_Q100_0p1_lambda.xy
+
+[range]
+r_min = 1.0
+r_max = 250.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 20
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.1439501643275594
+a = 2.948334730362112
+b = 2.95
+c = 4.704139838678591
+alpha = 90.0
+beta = 90.0
+gamma = 120.0
+d = 200.16484906129833
+biso_ti = 0.6267900132270816
+d_std = 0.0
+delta1 = 1.076051848509209
+fe = 0.5
+re = 200.0
+rho = 0.00022
+delta_g = 0.0
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = true
+alpha = false
+beta = false
+gamma = false
+d = true
+d_std = false
+biso_ti = true
+delta1 = true
+fe = true
+re = false
+rho = true
+delta_g = false
+
+[bounds]
+a = 2.0, 4.0
+c = 4.0, 5.0
+d = 100.0, 300.0
+biso_ti = 0.0, 1.0
+fe = 0.0, 1.0
+rho = 0.0, 0.1
+
+[contrast_factors]
+EdgeE1 = 0.357
+EdgeE2 = 0.0985
+EdgeE3 = 0.01689
+ScrewE1 = 0.2547
+ScrewE2 = 0.11415
+ScrewE3 = 0.0
+
+[constraints]
+

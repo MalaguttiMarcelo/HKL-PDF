@@ -1,0 +1,131 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/config/Calcite.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/5-CaCO3-150min.integrated.subtracted_bkg.corr.2th.qmax20.xy
+
+[range]
+r_min = 2.0
+r_max = 150.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = pah
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = false
+compute_local_trends_on_finish = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+export_finite_coordination = false
+saxs_model = sphere
+saxs_apply_qdamp = false
+saxs_apply_qmax = false
+
+[initial_values]
+scale = 0.10704634944828312
+qdamp = 0.00787114336321576
+delta_broad = 0.0014837841765491856
+qmax = 20.0
+qmax_zeros = 5.0
+d = 46.53756722954041
+d_std = 29.79364610750466
+a = 4.987202210092289
+b = 4.9889
+c = 17.063238785399783
+alpha = 90.0
+beta = 90.0
+gamma = 120.0
+pah_a = 8.384303699657696e-05
+pah_b = 0.0
+fe = 1.0
+EdgeE1 = 1.9500377011175742
+EdgeE2 = 0.5488414398105018
+EdgeE3 = 0.047678005919394195
+EdgeE4 = -2.786435210607355
+ScrewE1 = 0.0
+ScrewE2 = 0.0
+ScrewE3 = 0.0
+ScrewE4 = 0.0
+x_ca = 0.0
+y_ca = 0.0
+z_ca = 0.0
+occ_ca = 1.0
+x_c = 0.0
+y_c = 0.0
+z_c = 0.25
+occ_c = 1.0
+x_o = 0.25992
+y_o = 0.0
+z_o = 0.25
+occ_o = 1.0
+biso_C = 1.6008801774419965
+biso_Ca = 0.7025685431427757
+biso_O = 2.0029168333014598
+lambda_c-c_0 = 0.923
+lambda_ca-o_0 = 0.7559419039015604
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = true
+alpha = false
+beta = false
+gamma = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+d = true
+d_std = true
+pah_a = true
+pah_b = false
+fe = false
+EdgeE1 = true
+EdgeE2 = true
+EdgeE3 = true
+EdgeE4 = true
+ScrewE1 = false
+ScrewE2 = false
+ScrewE3 = false
+ScrewE4 = false
+x_ca = false
+y_ca = false
+z_ca = false
+occ_ca = false
+x_c = false
+y_c = false
+z_c = false
+occ_c = false
+x_o = false
+y_o = false
+z_o = false
+occ_o = false
+biso_C = false
+biso_Ca = false
+biso_O = false
+lambda_c-c_0 = true
+lambda_ca-o_0 = true
+
+[bounds]
+d = 0.0, 150.0
+a = 0.0, 
+c = 0.0, 
+scale = 0.0, 
+pah_a = 0.0, 0.1
+biso_C = 0.0, 10.0
+biso_Ca = 0.0, 10.0
+biso_O = 0.0, 10.0
+lambda_c-c_0 = 0.000, 1.000
+lambda_ca-o_0 = 0.0, 1.0
+
+[constraints]
+
+[crystallite_shape]
+mode = conventional
+

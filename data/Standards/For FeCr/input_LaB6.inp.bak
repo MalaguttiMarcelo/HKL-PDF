@@ -1,0 +1,82 @@
+[files]
+structure_file = data/LaB6.cif
+gr_data_file = data/LaB6_ID31.xy
+
+[range]
+r_min = 1.0
+r_max = 100.0
+
+[initial_values]
+scale = 0.43830437551322565
+biso_la = 0.3342578245151034
+biso_b = 1.0940733059374632
+delta_g = 0.0
+delta_broad = 0.014895803853316071
+delta1 = 2.1683259513656836e-05
+delta2 = 0.0
+eta = 0.0
+qdamp = 0.010444141820888953
+a = 4.1569162
+d = 1298.2263816056166
+d_std = 0.0
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qbroad = 0.0
+cedgea = 0.0
+cedgeb = 0.0
+cscrewa = 0.0
+cscrewb = 0.0
+
+[refinable_parameters]
+scale = true
+biso_la = true
+biso_b = true
+delta_g = false
+delta_broad = true
+delta1 = true
+delta2 = false
+qdamp = true
+eta = false
+a = false
+d = true
+d_std = false
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qbroad = false
+
+[bounds]
+scale = 0.0, 10.0
+biso_la = 0.0, 2.0
+biso_b = 0.0, 2.0
+delta_g = 0.0, 0.1
+delta_broad = 0.0, 0.1
+delta1 = 0.0, 2.0
+delta2 = 0.0, 5.0
+qdamp = 0.0, 2.0
+eta = 0.0, 1.0
+a = 2.8, 3.0
+d = 5.0, 10000.0
+d_std = 0.0, 1000.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[contrast_factors]
+edgee1 = 0.0
+edgee2 = 0.0
+screwe1 = 0.0
+screwe2 = 0.0
+

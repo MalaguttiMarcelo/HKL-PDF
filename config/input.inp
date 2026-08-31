@@ -1,0 +1,119 @@
+[files]
+structure_file = G:/Il mio Drive/DICAM/VisualStudio/pdf_fitting_project/data/Fe_bcc_300K.cif
+gr_data_file = G:/Il mio Drive/DICAM/VisualStudio/pdf_fitting_project/data/FeCr_ID31.xy
+
+[range]
+r_min = 1.0
+r_max = 150.0
+
+[initial_values]
+scale = 0.2606916209750484
+biso_fe = 0.35627348320402463
+delta_broad = 0.020436
+delta1 = 1.529133549506873
+delta2 = 0.0
+qdamp = 0.008513
+a = 2.8683900336748063
+d = 130.6376849025262
+d_std = 29.198688413252995
+rho = 0.0002546904177198886
+re = 100.0
+fe = 0.5865250844424535
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qbroad = 0.0
+eta = 0.5
+lambda_Fe-Fe_0 = 0.4483340111584476
+lambda_Fe-Fe_1 = 0.3661805047466751
+lambda_Fe-Fe_2 = 0.41576352971741376
+lambda_Fe-Fe_3 = 0.45112079164139524
+lambda_Fe-Fe_4 = 0.4995110739691667
+lambda_Fe-Fe_5 = 0.01595339531614514
+lambda_Fe-Fe_6 = 0.2333114903100075
+lambda_Fe-Fe_7 = 0.3549765478268139
+lambda_Fe-Fe_8 = 0.4141187654753214
+lambda_Fe-Fe_9 = 0.16067503557678378
+lambda_Fe-Fe_10 = 0.05384259128368226
+lambda_Fe-Fe_11 = 0.10339298721807871
+b = 2.868615
+c = 2.868615
+delta_g = 0.0
+
+[refinable_parameters]
+scale = True
+biso_fe = False
+delta_broad = False
+delta1 = False
+delta2 = False
+qdamp = False
+a = False
+d = True
+d_std = True
+rho = True
+re = False
+fe = True
+alpha = False
+beta = False
+gamma = False
+b = False
+c = False
+qbroad = False
+eta = False
+lambda_Fe-Fe_0 = False
+lambda_Fe-Fe_1 = False
+lambda_Fe-Fe_2 = False
+lambda_Fe-Fe_3 = False
+lambda_Fe-Fe_4 = False
+lambda_Fe-Fe_5 = False
+lambda_Fe-Fe_6 = False
+lambda_Fe-Fe_7 = False
+lambda_Fe-Fe_8 = False
+lambda_Fe-Fe_9 = False
+lambda_Fe-Fe_10 = False
+lambda_Fe-Fe_11 = False
+delta_g = False
+
+[bounds]
+scale = 0.1, 10.0
+biso_fe = 0.0, 1.0
+delta_broad = 0.0, 0.1
+delta1 = 0.0, 2.0
+delta2 = 0.0, 5.0
+qdamp = 0.0, 2.0
+a = 2.0, 4.0
+d = 5.0, 200.0
+d_std = 0.0, 100.0
+rho = 0.0, 0.1
+fe = 0.0, 1.0
+lambda_Fe-Fe_0 = 0, 1
+lambda_Fe-Fe_1 = 0, 1
+lambda_Fe-Fe_2 = 0, 1
+lambda_Fe-Fe_3 = 0, 1
+lambda_Fe-Fe_4 = 0, 1
+lambda_Fe-Fe_5 = 0, 1
+lambda_Fe-Fe_6 = 0, 1
+lambda_Fe-Fe_7 = 0, 1
+lambda_Fe-Fe_8 = 0, 1
+lambda_Fe-Fe_9 = 0, 1
+lambda_Fe-Fe_10 = 0,1
+lambda_Fe-Fe_11 = 0,1
+re = 5.0, 500.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[constraints]
+re = d
+
+[contrast_factors]
+

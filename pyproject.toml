@@ -1,0 +1,74 @@
+[build-system]
+requires = [
+    "setuptools>=68",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hkl-pdf"
+version = "0.1.0"
+description = "Graphical pair distribution function fitting and crystallite-shape analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+
+authors = [
+    {name = "Marcelo Malagutti"}
+]
+
+keywords = [
+    "pair distribution function",
+    "PDF",
+    "crystallography",
+    "microstructure",
+    "nanomaterials",
+    "SAXS"
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics"
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+    "pymatgen",
+    "pandas",
+    "joblib",
+    "PySide6",
+    "matplotlib",
+    "pyvista",
+    "pyvistaqt",
+    "vtk",
+    "qtpy"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "pyinstaller",
+    "mkdocs",
+    "mkdocs-material"
+]
+
+[project.scripts]
+hkl-pdf = "pdf_fitting.gui.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pdf_fitting*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests"
+]

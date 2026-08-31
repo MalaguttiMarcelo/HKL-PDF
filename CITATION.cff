@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "PDF Fitting"
+type: software
+authors:
+  - family-names: "YOUR FAMILY NAME"
+    given-names: "YOUR GIVEN NAME"
+version: "0.1.0"
+date-released: "2026-MM-DD"
+repository-code: "https://github.com/YOUR-USERNAME/pdf-fitting"
+license: "BSD-3-Clause"
+keywords:
+  - pair distribution function
+  - crystallography
+  - nanostructure
+  - materials science

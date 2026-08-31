@@ -1,0 +1,135 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/config/Calcite.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/Calcite_cyllinder_60baseX130height_1Biso_simulated.xy
+
+[range]
+r_min = 1.0
+r_max = 100.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = isotropic
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = false
+compute_local_trends_on_finish = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+export_finite_coordination = false
+
+[initial_values]
+scale = 0.26549828783648627
+a = 4.9889
+b = 4.9889
+c = 17.073
+alpha = 90.0
+beta = 90.0
+gamma = 120.0
+x_ca = 0.0
+y_ca = 0.0
+z_ca = 0.0
+occ_ca = 1.0
+x_c = 0.0
+y_c = 0.0
+z_c = 0.25
+occ_c = 1.0
+x_o = 0.25992
+y_o = 0.0
+z_o = 0.25
+occ_o = 1.0
+biso_C = 5.804884798872212
+biso_Ca = 3.9672094424184987
+biso_O = 4.978682962389023
+qdamp = 0.0
+delta_broad = 0.0
+qmax = 25.0
+qmax_zeros = 5.0
+delta_g = 0.0
+d = 0.0
+d_std = 0.0
+cyl_diameter = 200.0
+cyl_thickness = 5.0
+cyl_thickness_std = 0.0
+cyl_axis_h = 0.0
+cyl_axis_k = 0.0
+cyl_axis_l = 1.0
+
+[refinable_parameters]
+scale = true
+a = false
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+x_ca = false
+y_ca = false
+z_ca = false
+occ_ca = false
+x_c = false
+y_c = false
+z_c = false
+occ_c = false
+x_o = false
+y_o = false
+z_o = false
+occ_o = false
+biso_C = false
+biso_Ca = false
+biso_O = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+delta_g = false
+d = false
+d_std = false
+cyl_diameter = true
+cyl_thickness = true
+cyl_thickness_std = false
+cyl_axis_h = false
+cyl_axis_k = false
+cyl_axis_l = false
+
+[bounds]
+biso_C = 0.0, 10.0
+biso_Ca = 0.0, 10.0
+biso_O = 0.0, 10.0
+scale = 0.0, 
+cyl_diameter = 0, 
+cyl_thickness = 0, 
+
+[constraints]
+
+[crystallite_shape]
+mode = conventional
+axis_h = false
+axis_k = false
+axis_l = true
+base1_h = true
+base1_k = false
+base1_l = false
+base2_h = false
+base2_k = true
+base2_l = false
+diameter_cells = 12.0
+diameter_infinite = false
+diameter_max_cells = 20.0
+diameter_min_cells = 10.0
+height_cells = 8.0
+height_max_cells = 10.0
+height_min_cells = 5.0
+n_scan_candidates = true
+preview_coordinates = real_space
+scan_diameter = false
+scan_height = false
+shape_type = cylinder
+step_cells = 1.0
+search_mode = predefined
+

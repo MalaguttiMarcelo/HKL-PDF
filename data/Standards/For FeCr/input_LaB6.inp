@@ -1,0 +1,60 @@
+[files]
+structure_file = Z:/Softwares/pdf_fitting_project/data/Standards/For FeCr/LaB6.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/data/Standards/For FeCr/LaB6_ID31.xy
+
+[range]
+r_min = 1.0
+r_max = 150.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+
+[initial_values]
+scale = 0.442270138079594
+a = 4.1569162
+b = 4.1569162
+c = 4.1569162
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qdamp = 0.011485099495637478
+delta_broad = 0.0014090180673610453
+qmax = 20.0
+qmax_zeros = 5.0
+biso_b = 1.543091932705053
+biso_la = 0.3250889786572195
+delta1 = 0.8794937003599823
+
+[refinable_parameters]
+scale = true
+a = false
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qdamp = true
+delta_broad = true
+qmax = false
+qmax_zeros = false
+biso_b = true
+biso_la = true
+delta1 = true
+
+[bounds]
+qdamp = 0.0, 
+delta_broad = 0.0, 
+
+[constraints]
+
+[contrast_factors]
+

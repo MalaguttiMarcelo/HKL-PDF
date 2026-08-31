@@ -1,0 +1,62 @@
+[files]
+structure_file = data/Fe_bcc_300K.cif
+gr_data_file = data/FeCr_ID31.xy
+
+[range]
+r_min = 1.0
+r_max = 50
+
+[initial_values]
+scale = 0.266792
+biso_Fe = 0.485463836
+delta_g = 0.00627410391
+delta_broad = 0.020436
+delta1 = 1.44203588
+delta2 = 0.0
+qdamp = 0.008513
+a = 2.868723
+d = 99.6043388
+d_var =  78.1801016
+rho = 0
+Re =  100
+fE = 0.500000
+
+
+[refinable_parameters]
+scale = False
+biso_Fe = False
+delta_g = False
+delta_broad = False
+delta1 = False
+delta2 = False
+qdamp = False
+a = False
+d = False
+d_var = Falsed
+rho = False
+Re =  False
+fE =  False
+
+[bounds]
+scale = 0.1, 10.0
+biso_Fe = 0.0, 5.0
+delta_g = 0.0, 0.1
+delta_broad = 0.0, 0.1
+delta1 = 0.0, 2.0
+delta2 = 0.0, 5.0
+qdamp = 0.0, 2
+a = 2.0, 4.0
+d = 5.0, 200.0
+d_var = 0.0, 100.0
+rho = 0, 0.1
+Re = 5, 500
+fE = 0, 1
+
+[pair_generation]
+r_extension = 1.2
+
+[contrast_factors]
+CEdgeA = 0.265280
+CEdgeB = -0.355950
+CScrewA = 0.307288
+CScrewB = -0.819979
