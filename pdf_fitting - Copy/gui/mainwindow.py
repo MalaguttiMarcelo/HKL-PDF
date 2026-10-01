@@ -12,20 +12,23 @@ from PySide6.QtGui import QShortcut, QKeySequence, QColor
 from PySide6.QtCore import Qt
 
 from pdf_fitting.io_handler import read_input_file, update_input_file_with_refined_params
+from pdf_fitting.models.gr_model import PDFCalculator, lattice_matrix, apply_lattice_constraints
 
+from pdf_fitting.fit_engine import apply_constraints, apply_model_lattice_constraints_to_params
+
+from .worker import FitWorker
 from .builder import InputBuilder
-from .plots import MplPlot
-from .gpu_plots import (
-    FastLinePlot,
-    FastParamEvolutionTabs,
-    FastGridMap,
-)
+from .plots import MplPlot, ParamEvolutionTabs
+from .structure_view import StructureViewer
 
+from pymatgen.core import Structure
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 from matplotlib.collections import LineCollection
 
 from matplotlib.colors import to_rgba, to_hex
 
+from .cif_utils import read_cif_asu_sites
 
 DEFAULT_TICK_MARKER_MIN_R = 0.0
 DEFAULT_TICK_MARKER_MAX_R = 20.0
@@ -788,166 +791,76 @@ class TickMarkerFilterDialog(QtWidgets.QDialog):
             it = self.tbl_pairs.item(row, 0)
             if it is not None:
                 it.setCheckState(Qt.Unchecked)
+
     def apply_to_owner(self) -> None:
-        """
-        Store tick-marker range, filters, selected pairs, and per-pair
-        marker styles in the MainWindow.
-        """
         selected_pairs = set()
         all_pairs = set()
-        tick_pair_styles = {}
 
-        # ---------------------------------------------------------
-        # Tick-marker range
-        # ---------------------------------------------------------
-        tick_rmin = float(
-            self.spin_tick_rmin.value()
-        )
+        tick_styles = dict(getattr(self.owner, "_tick_pair_style", {}) or {})
 
-        tick_rmax = float(
-            self.spin_tick_rmax.value()
-        )
+        rmin = float(self.spin_tick_rmin.value())
+        rmax = float(self.spin_tick_rmax.value())
 
-        if tick_rmax < tick_rmin:
-            tick_rmin, tick_rmax = (
-                tick_rmax,
-                tick_rmin,
-            )
+        if rmax <= rmin:
+            rmax = rmin + 0.001
 
-        self.owner._tick_range_min = float(
-            tick_rmin
-        )
+        self.owner._tick_range_min = rmin
+        self.owner._tick_range_max = rmax
 
-        self.owner._tick_range_max = float(
-            tick_rmax
-        )
+        for row in range(self.tbl_pairs.rowCount()):
+            it_chk = self.tbl_pairs.item(row, 0)
+            it_pair = self.tbl_pairs.item(row, 1)
 
-        # ---------------------------------------------------------
-        # Direction filter
-        # ---------------------------------------------------------
-        self.owner._tick_filter_direction_mode = str(
-            self.combo_direction.currentData()
-            or "all"
-        )
-
-        self.owner._tick_filter_direction_text = str(
-            self.le_contains.text()
-            or ""
-        ).strip()
-
-        # ---------------------------------------------------------
-        # Pair visibility and styles
-        #
-        # TickMarkerFilterDialog uses tbl_pairs:
-        #
-        #   0 Show
-        #   1 Pair
-        #   2 N ticks
-        #   3 Color button
-        #   4 Width spinbox
-        #   5 Alpha spinbox
-        # ---------------------------------------------------------
-        for row in range(
-            self.tbl_pairs.rowCount()
-        ):
-            show_item = self.tbl_pairs.item(
-                row,
-                0,
-            )
-
-            pair_item = self.tbl_pairs.item(
-                row,
-                1,
-            )
-
-            if pair_item is None:
+            if it_pair is None:
                 continue
 
-            pair = str(
-                pair_item.text()
-            ).strip()
-
+            pair = str(it_pair.text()).strip()
             if not pair:
                 continue
 
-            all_pairs.add(
-                pair
-            )
+            all_pairs.add(pair)
 
-            if (
-                show_item is not None
-                and show_item.checkState()
-                == Qt.Checked
-            ):
-                selected_pairs.add(
-                    pair
-                )
+            if it_chk is not None and it_chk.checkState() == Qt.Checked:
+                selected_pairs.add(pair)
 
-            color_button = self.tbl_pairs.cellWidget(
-                row,
-                3,
-            )
+            # Extract style widgets
+            btn_color = self.tbl_pairs.cellWidget(row, 3)
+            spin_width = self.tbl_pairs.cellWidget(row, 4)
+            spin_alpha = self.tbl_pairs.cellWidget(row, 5)
 
-            color = standard_pair_color(
-                pair,
-                row,
-            )
-
-            if color_button is not None:
+            color = ""
+            if btn_color is not None:
                 color = _safe_mpl_color(
-                    color_button.property(
-                        "color"
-                    ),
-                    color,
+                    btn_color.property("color"),
+                    standard_pair_color(pair, row),
                 )
 
-            width_widget = self.tbl_pairs.cellWidget(
-                row,
-                4,
-            )
+            linewidth = 0.7
+            if spin_width is not None:
+                linewidth = float(spin_width.value())
 
-            alpha_widget = self.tbl_pairs.cellWidget(
-                row,
-                5,
-            )
+            alpha = 0.30
+            if spin_alpha is not None:
+                alpha = float(spin_alpha.value())
 
-            try:
-                linewidth = float(
-                    width_widget.value()
-                )
-            except Exception:
-                linewidth = 0.7
-
-            try:
-                alpha = float(
-                    alpha_widget.value()
-                )
-            except Exception:
-                alpha = 0.30
-
-            tick_pair_styles[pair] = {
+            tick_styles[pair] = {
                 "color": color,
-                "linewidth": max(
-                    0.1,
-                    linewidth,
-                ),
-                "alpha": max(
-                    0.01,
-                    min(
-                        1.0,
-                        alpha,
-                    ),
-                ),
+                "linewidth": linewidth,
+                "alpha": alpha,
             }
 
-        # None means every pair is enabled.
+        # If all pairs are selected, store None = no pair filter.
         if selected_pairs == all_pairs:
             self.owner._tick_filter_pairs = None
         else:
             self.owner._tick_filter_pairs = selected_pairs
 
-        self.owner._tick_pair_style = tick_pair_styles
+        self.owner._tick_filter_direction_mode = str(
+            self.combo_direction.currentData() or "all"
+        )
+        self.owner._tick_filter_direction_text = str(self.le_contains.text()).strip()
 
+        self.owner._tick_pair_style = tick_styles
 
 class WarrenDisplayOptionsDialog(QtWidgets.QDialog):
     """Popup for Warren plot display options."""
@@ -1568,105 +1481,51 @@ class LocalDynamicsDisplayOptionsDialog(QtWidgets.QDialog):
                 it.setCheckState(Qt.Unchecked)
 
     def apply_to_owner(self) -> None:
-        selected_pairs = set()
-        all_pairs = set()
-
-        pair_styles = dict(
-            getattr(
-                self.owner,
-                "_local_pair_style",
-                {},
-            )
-            or {}
-        )
-
-        for row in range(
-            self.tbl.rowCount()
-        ):
-            show_item = self.tbl.item(
-                row,
-                0,
-            )
-
-            pair_item = self.tbl.item(
-                row,
-                1,
-            )
-
-            if pair_item is None:
+        selected = []
+        dir_style = dict(getattr(self.owner, "_warren_dir_style", {}) or {})
+    
+        for row in range(self.tbl.rowCount()):
+            it_chk = self.tbl.item(row, 0)
+            it_dir = self.tbl.item(row, 1)
+    
+            if it_chk is None or it_dir is None:
                 continue
-
-            pair = str(
-                pair_item.text()
-            ).strip()
-
-            if not pair:
+            
+            d = it_dir.data(Qt.UserRole)
+    
+            if d is None:
                 continue
-
-            all_pairs.add(
-                pair
-            )
-
-            if (
-                show_item is not None
-                and show_item.checkState()
-                == Qt.Checked
-            ):
-                selected_pairs.add(
-                    pair
-                )
-
-            color_button = self.tbl.cellWidget(
-                row,
-                2,
-            )
-
-            color = standard_pair_color(
-                pair,
-                row,
-            )
-
-            if color_button is not None:
+            
+            if it_chk.checkState() == Qt.Checked:
+                selected.append(d)
+    
+            it_color = self.tbl.item(row, 5)
+    
+            if it_color is not None:
                 color = _safe_mpl_color(
-                    color_button.property(
-                        "color"
-                    ),
-                    color,
+                    it_color.data(Qt.UserRole),
+                    _COLOR_CYCLE[row % len(_COLOR_CYCLE)],
                 )
-
-            pair_styles[pair] = {
-                "color": color,
-            }
-
-        if selected_pairs == all_pairs:
-            self.owner._local_selected_pairs = None
-        else:
-            self.owner._local_selected_pairs = selected_pairs
-
-        self.owner._local_display_mode = str(
-            self.combo_mode.currentData()
-            or "both"
-        )
-
-        self.owner._local_style = {
-            "lambda_marker": self.combo_lam_marker.currentText(),
-            "delta_marker": self.combo_del_marker.currentText(),
-            "lambda_linestyle": self.combo_lam_line.currentText(),
-            "delta_linestyle": self.combo_del_line.currentText(),
-            "linewidth": float(
-                self.spin_lw.value()
-            ),
-            "markersize": float(
-                self.spin_ms.value()
-            ),
+            else:
+                color = _COLOR_CYCLE[row % len(_COLOR_CYCLE)]
+    
+            dir_style[d] = {"color": color}
+    
+        self.owner._warren_selected_keys = selected
+        self.owner._warren_y_mode = str(self.combo_y.currentData() or "warren")
+    
+        self.owner._warren_style = {
+            "linestyle": "None" if self.combo_line.currentText() == "None" else self.combo_line.currentText(),
+            "marker": "None" if self.combo_marker.currentText() == "None" else self.combo_marker.currentText(),
+            "linewidth": float(self.spin_lw.value()),
+            "markersize": float(self.spin_ms.value()),
             "xmin": self.le_xmin.text().strip(),
             "xmax": self.le_xmax.text().strip(),
             "ymin": self.le_ymin.text().strip(),
             "ymax": self.le_ymax.text().strip(),
         }
-
-        self.owner._local_pair_style = pair_styles
-
+    
+        self.owner._warren_dir_style = dir_style
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -1763,48 +1622,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Add the VIEW PDF PLOT button to top_bar
         self.btn_view_pdf = QtWidgets.QPushButton("VIEW PDF PLOT")
         self.btn_view_pdf.setFixedSize(220, 58)
-        self.btn_view_structure = QtWidgets.QPushButton(
-            "VIEW STRUCTURE"
-        )
-
-        self.btn_view_structure.setFixedSize(
-            220,
-            58,
-        )
-
-        self.btn_view_structure.setStyleSheet(
-            """
-            QPushButton {
-                font-size: 16px;
-                font-weight: bold;
-                background-color: #1B5E20;
-                color: white;
-                border: 2px solid #2E7D32;
-                border-radius: 10px;
-                padding: 10px;
-            }
-
-            QPushButton:hover {
-                background-color: #2E7D32;
-            }
-
-            QPushButton:pressed {
-                background-color: #144A18;
-            }
-
-            QPushButton:disabled {
-                color: #BDBDBD;
-                background-color: #EEEEEE;
-                border-color: #CCCCCC;
-            }
-            """
-        )
-
-        self.btn_view_structure.setToolTip(
-            "Open the GPU crystal-structure viewer."
-        )
-
-
         self.btn_view_pdf.setStyleSheet("""
             QPushButton {
                 font-size: 16px;
@@ -1878,13 +1695,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         view_bar.addSpacing(25)
         
-        view_bar.addWidget(
-            self.btn_view_pdf
-        )
-
-        view_bar.addWidget(
-            self.btn_view_structure
-        )
+        view_bar.addWidget(self.btn_view_pdf)
         
         view_bar.addStretch(1)
         
@@ -1897,12 +1708,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Initialize instance variables
         # -------------------------
         self._current_path: Optional[str] = None
-        self._worker: Optional[Any] = None
-        self._calculate_model = None
-        self._calculate_model_key = None
-        self._model_prepare_worker = None
-        self._model_prepare_generation = 0
-        self._prepared_calculation = None
+        self._worker: Optional[FitWorker] = None
         self._sync_block = False
         self._save_on_stop = False
 
@@ -1911,10 +1717,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_builder_structure_path_for_view: str = ""
 
         self._pdf_dialog: Optional[PdfPlotDialog] = None
-        self._structure_studio = None
-        self._structure_studio_path = ""
-        self._structure_studio_signature = None
-
         self._pdf_detached = False
         self._returning_pdf_to_main = False
 
@@ -1936,11 +1738,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Results tabs
         self.tabs = QtWidgets.QTabWidget()
 
-        self.plot_rwp = FastLinePlot(
-            title="Rwp vs iteration",
-            xlabel="nfev",
-            ylabel="Rwp (%)",
-        )
+        self.plot_rwp = MplPlot(title="Rwp vs iteration")
         self.rwp_line = None
         self.rwp_x: List[float] = []
         self.rwp_y: List[float] = []
@@ -1948,11 +1746,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._rwp_display_eps = 0.01  # percent Rwp; smaller changes are displayed as flat
 
-        self.plot_warren = FastLinePlot(
-            title="Warren plot (directional strain)",
-            xlabel="L (Å)",
-            ylabel="Warren broadening",
-        )
+        self.plot_warren = MplPlot(title="Warren plot (directional strain)")
 
         # Warren plot state/controls
         self._warren_raw: Dict[Tuple[int, int, int], List[Tuple[float, float]]] = {}
@@ -2016,12 +1810,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_warren_window.clicked.connect(self.open_warren_plot_window)
         self.btn_save_warren_txt.clicked.connect(self.save_warren_txt)
 
-        self.plot_size = FastLinePlot(
-            title="Crystallite size distribution",
-            xlabel="Size (Å)",
-            ylabel="Probability density",
-        )
-        self.param_tabs = FastParamEvolutionTabs()
+        self.plot_size = MplPlot(title="Crystallite size distribution")
+        self.param_tabs = ParamEvolutionTabs()
 
         # Crystallite-shape grid-search plots
         self._cs_results: List[Dict[str, Any]] = []
@@ -2032,23 +1822,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cs_grid_tabs = QtWidgets.QTabWidget()
 
-        self.plot_cs_diameter = FastLinePlot(
-            title="Final Rwp vs diameter",
-            xlabel="Diameter / unit cells",
-            ylabel="Best Rwp (%)",
-        )
-
-        self.plot_cs_height = FastLinePlot(
-            title="Final Rwp vs axis length",
-            xlabel="Axis length / unit cells",
-            ylabel="Best Rwp (%)",
-        )
-
-        self.plot_cs_map = FastGridMap(
-            title="CS grid search Rwp map",
-            xlabel="Diameter / unit cells",
-            ylabel="Axis length / unit cells",
-        )
+        self.plot_cs_diameter = MplPlot(title="Final Rwp vs diameter")
+        self.plot_cs_height = MplPlot(title="Final Rwp vs axis length")
+        self.plot_cs_map = MplPlot(title="CS grid search Rwp map")
 
         self.cs_grid_tabs.addTab(self.plot_cs_diameter, "Rwp vs diameter")
         self.cs_grid_tabs.addTab(self.plot_cs_height, "Rwp vs axis length")
@@ -2057,11 +1833,7 @@ class MainWindow(QtWidgets.QMainWindow):
         _cs_layout.addWidget(self.cs_grid_tabs, 1)
 
         # Local lambda / delta trend plot
-        self.plot_local_trends = FastLinePlot(
-            title="Local dynamics trends",
-            xlabel="Pair distance r (Å)",
-            ylabel="λ or δ continuation",
-        )
+        self.plot_local_trends = MplPlot(title="Local dynamics trends")
         self._local_trends: Dict[str, Any] = {}
         self._last_refined_params: Dict[str, Any] = {}
 
@@ -2143,23 +1915,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._local_trend_timer.setSingleShot(True)
         self._local_trend_timer.timeout.connect(self._update_local_trends_from_current_gui)
 
-        self.structure_view = None
-        self._pending_structure_cfg = None
-
-        self.structure_page = QtWidgets.QWidget()
-        self.structure_page_layout = QtWidgets.QVBoxLayout(self.structure_page)
-        self.structure_page_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.structure_placeholder = QtWidgets.QLabel(
-            "Open this tab to initialize the 3D structure viewer."
-        )
-        self.structure_placeholder.setAlignment(Qt.AlignCenter)
-        self.structure_placeholder.setWordWrap(True)
-
-        self.structure_page_layout.addWidget(
-            self.structure_placeholder,
-            1,
-        )
+        self.structure_view = StructureViewer()
 
         self.tabs.addTab(self.plot_rwp, "Rwp")
         self.tabs.addTab(self.cs_grid_widget, "CS grid")
@@ -2167,7 +1923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.plot_size, "Size dist.")
         self.tabs.addTab(self.param_tabs, "Params")
         self.tabs.addTab(self.plot_local_trends, "Local trends")
-        self._structure_tab_index = -1
+        self.tabs.addTab(self.structure_view, "Structure")
 
         # -------------------------
         # Horizontal splitter: LEFT vs RIGHT (default 50/50)
@@ -2352,9 +2108,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_clear.clicked.connect(self.clear_graphs)
 
         self.btn_view_pdf.clicked.connect(self.detach_pdf_plot)
-        self.btn_view_structure.clicked.connect(
-            self.open_structure_studio
-        )
         self.btn_tick_markers.toggled.connect(self._on_tick_markers_toggled)
         self.btn_autoscale.clicked.connect(self.autoscale_pdf)
         self.chk_show_shape_factor.toggled.connect(self._toggle_shape_factor_display)
@@ -2378,70 +2131,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._on_zoom_changed()
         self._update_run_button_modes()
 
-    def _on_results_tab_changed(self, index: int) -> None:
-        """
-        Initialize the heavy PyVista/VTK structure viewer only when the user opens
-        the Structure tab for the first time.
-        """
-        try:
-            if self.tabs.widget(index) is not self.structure_page:
-                return
-
-            self._ensure_structure_viewer()
-
-        except Exception as exc:
-            self.statusBar().showMessage(
-                f"Could not initialize the structure viewer: {exc}"
-            )
-
-
-    def _ensure_structure_viewer(self) -> None:
-        """
-        Lazily import and construct StructureViewer.
-
-        Importing StructureViewer loads PyVista, VTK, and creates an OpenGL context,
-        so it must not happen during normal application startup.
-        """
-        if self.structure_view is not None:
-            return
-
-        self.statusBar().showMessage(
-            "Initializing 3D structure viewer..."
-        )
-        QtWidgets.QApplication.processEvents()
-
-        from .structure_view import StructureViewer
-
-        viewer = StructureViewer()
-
-        if self.structure_placeholder is not None:
-            self.structure_page_layout.removeWidget(
-                self.structure_placeholder
-            )
-            self.structure_placeholder.deleteLater()
-            self.structure_placeholder = None
-
-        self.structure_page_layout.addWidget(
-            viewer,
-            1,
-        )
-
-        self.structure_view = viewer
-
-        cfg = self._pending_structure_cfg
-
-        if cfg is None:
-            try:
-                cfg = self._parse_raw_to_dict()
-            except Exception:
-                cfg = None
-
-        if cfg:
-            self._refresh_structure_view(cfg)
-
-        self.statusBar().showMessage(
-            "3D structure viewer initialized."
-        )
     #------------------------------------------------------
     #TICK MARKERS
     #------------------------------------------------------
@@ -2493,11 +2182,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         This replaces the old separate 'Full tick range' button.
         """
-
-        from pdf_fitting.models.gr_model import PDFCalculator
-        from pdf_fitting.fit_engine import apply_constraints
-
-
         try:
             max_r = float(max_r)
 
@@ -2772,8 +2456,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._sync_block:
             return
 
-        self._prepared_calculation = None
-
         if self.left_tabs.currentWidget() is self.builder:
             # Auto-sync Builder -> raw input immediately.
             # commit_edits=False avoids stealing focus while the user is typing in a table.
@@ -2820,9 +2502,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_raw_changed(self) -> None:
         if self._sync_block:
             return
-        
-        self._prepared_calculation = None
-
         if self.left_tabs.currentWidget() is self.raw_editor:
             cfg = self._parse_raw_to_dict()
             if cfg is None:
@@ -2839,82 +2518,87 @@ class MainWindow(QtWidgets.QMainWindow):
             # Do NOT compute shells / local trends here.
             # Shell generation must happen only when Run is clicked.
 
-    def _refresh_structure_view(
-        self,
-        cfg: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def _refresh_structure_view(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         """
-        Store the latest configuration immediately.
+        Refresh the Structure tab, but do NOT reload/reparse the CIF unless the
+        structure file path actually changed.
 
-        Load and render the complete structure only after the Structure tab has
-        initialized its PyVista/VTK viewer.
+        This avoids expensive CIF parsing and 3D redraws on every small GUI edit.
         """
         try:
             if cfg is None:
                 cfg = self._parse_raw_to_dict()
 
-            self._pending_structure_cfg = cfg
-
-            if self.structure_view is None:
-                return
-
             if not cfg:
                 self.structure_view.clear()
+                self._warren_crystal_system = None
                 self._last_structure_view_path = ""
+                self._last_structure_crystal_path = ""
                 return
 
+            files = cfg.get("files", {}) if isinstance(cfg.get("files", {}), dict) else {}
+
             path = str(
-                cfg.get(
+                files.get(
                     "structure_file",
-                    "",
+                    cfg.get("structure_file", ""),
                 )
                 or ""
             ).strip()
 
             if not path:
                 self.structure_view.clear()
+                self._warren_crystal_system = None
                 self._last_structure_view_path = ""
+                self._last_structure_crystal_path = ""
                 return
 
             try:
-                absolute_path = os.path.abspath(
-                    path
-                )
+                path_abs = os.path.abspath(path)
             except Exception:
-                absolute_path = path
+                path_abs = path
 
-            if (
-                absolute_path
-                != getattr(
-                    self,
-                    "_last_structure_view_path",
-                    "",
-                )
-            ):
-                self.structure_view.load_structure(
-                    path
-                )
+            # ---------------------------------------------------------
+            # Expensive operation: only reload structure if path changed.
+            # ---------------------------------------------------------
+            if path_abs != getattr(self, "_last_structure_view_path", ""):
+                self.structure_view.load_structure(path)
+                self._last_structure_view_path = path_abs
 
-                self._last_structure_view_path = (
-                    absolute_path
-                )
-
+            # Cheap display update. Keep this allowed on every change.
             try:
                 self.structure_view.set_biso_by_species(
-                    cfg.get(
-                        "biso_by_species",
-                        {},
-                    )
-                    or {}
+                    cfg.get("biso_by_species", {}) or {}
                 )
             except Exception:
                 pass
 
-        except Exception as exc:
-            print(
-                "[STRUCTURE VIEW] Could not refresh viewer: "
-                f"{exc}"
-            )
+            # ---------------------------------------------------------
+            # Expensive-ish SpacegroupAnalyzer: only redo if path changed.
+            # ---------------------------------------------------------
+            if path_abs != getattr(self, "_last_structure_crystal_path", ""):
+                self._warren_crystal_system = None
+
+                try:
+                    if path and os.path.exists(path):
+                        if str(path).lower().endswith(".cif"):
+                            structure, _asu = read_cif_asu_sites(path)
+                        else:
+                            structure = Structure.from_file(path)
+
+                        if structure is not None:
+                            sga = SpacegroupAnalyzer(structure, symprec=1e-3)
+                            self._warren_crystal_system = str(
+                                sga.get_crystal_system() or ""
+                            ).lower()
+
+                except Exception:
+                    self._warren_crystal_system = None
+
+                self._last_structure_crystal_path = path_abs
+
+        except Exception:
+            pass
 
     # -------------------------
     # File operations
@@ -2927,9 +2611,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        self._structure_studio_path = ""
-        self._structure_studio_signature = None
-        
         self._current_path = None
         self._sync_block = True
         try:
@@ -2944,237 +2625,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.left_tabs.setCurrentWidget(self.builder)
         self.clear_graphs()
-        if self.structure_view is not None:
-            self.structure_view.clear()
-
-        self._pending_structure_cfg = None
-        self._calculate_model = None
-        self._calculate_model_key = None
-
-        self._model_prepare_generation += 1
-        self._prepared_calculation = None
-
+        self.structure_view.clear()
         self.statusBar().showMessage("New input (unsaved). Use 'Save as…' to write to disk.")
 
         self._update_run_button_modes()
-
-        self._structure_studio_path = ""
-
-    def _start_background_model_preparation(
-        self,
-        config: Dict[str, Any],
-    ) -> None:
-        """
-        Start numerical initialization after input loading while keeping the
-        GUI responsive.
-        """
-        if not isinstance(
-            config,
-            dict,
-        ):
-            return
-
-        structure_file = str(
-            config.get(
-                "structure_file",
-                "",
-            )
-            or ""
-        ).strip()
-
-        gr_data_file = str(
-            config.get(
-                "gr_data_file",
-                "",
-            )
-            or ""
-        ).strip()
-
-        if (
-            not structure_file
-            or not os.path.exists(structure_file)
-            or not gr_data_file
-            or not os.path.exists(gr_data_file)
-        ):
-            return
-
-        existing_worker = getattr(
-            self,
-            "_model_prepare_worker",
-            None,
-        )
-
-        if (
-            existing_worker is not None
-            and existing_worker.isRunning()
-        ):
-            print(
-                "[MODEL PREPARE] A preparation worker is already running."
-            )
-            return
-
-        self._model_prepare_generation += 1
-
-        generation = int(
-            self._model_prepare_generation
-        )
-
-        from .model_prepare_worker import ModelPrepareWorker
-
-        worker = ModelPrepareWorker(
-            config=config,
-            generation=generation,
-            parent=self,
-        )
-
-        worker.prepared.connect(
-            self._on_model_prepared
-        )
-
-        worker.failed.connect(
-            self._on_model_prepare_failed
-        )
-
-        worker.status.connect(
-            lambda message: self.statusBar().showMessage(
-                message
-            )
-        )
-
-        worker.finished.connect(
-            self._on_model_prepare_thread_finished
-        )
-
-        self._model_prepare_worker = worker
-
-        self.btn_calculate.setEnabled(
-            False
-        )
-
-        self.statusBar().showMessage(
-            "Input loaded. Preparing the numerical model in background..."
-        )
-
-        worker.start()
-
-
-    @QtCore.Slot(object)
-    def _on_model_prepared(
-        self,
-        payload,
-    ) -> None:
-        """
-        Store the model prepared by the latest valid worker.
-        """
-        if not isinstance(
-            payload,
-            dict,
-        ):
-            return
-
-        generation = int(
-            payload.get(
-                "generation",
-                -1,
-            )
-        )
-
-        if generation != int(
-            self._model_prepare_generation
-        ):
-            print(
-                "[MODEL PREPARE] Ignoring stale model."
-            )
-            return
-
-        config = payload[
-            "config"
-        ]
-
-        r_exp = np.asarray(
-            payload[
-                "r_exp"
-            ],
-            dtype=float,
-        )
-
-        pair_cutoff = float(
-            payload[
-                "pair_cutoff"
-            ]
-        )
-
-        model_key = self._calculate_model_key_for(
-            config,
-            r_exp,
-            pair_cutoff,
-        )
-
-        self._calculate_model = payload[
-            "model"
-        ]
-
-        self._calculate_model_key = model_key
-        self._prepared_calculation = payload
-
-        print(
-            "[MODEL PREPARE] Ready: "
-            f"imports={payload.get('import_s', 0.0):.3f} s, "
-            f"data={payload.get('data_s', 0.0):.3f} s, "
-            f"model={payload.get('model_s', 0.0):.3f} s, "
-            f"warm evaluation={payload.get('evaluation_s', 0.0):.3f} s, "
-            f"total={payload.get('total_s', 0.0):.3f} s"
-        )
-
-        self.btn_calculate.setEnabled(
-            True
-        )
-
-        self.statusBar().showMessage(
-            "Input loaded. Numerical model is ready."
-        )
-
-
-    @QtCore.Slot(str)
-    def _on_model_prepare_failed(
-        self,
-        message: str,
-    ) -> None:
-        """
-        Preparation failure is non-fatal. Calculate can still build the model.
-        """
-        print(
-            "[MODEL PREPARE] Background preparation failed:"
-        )
-
-        print(
-            message
-        )
-
-        self.btn_calculate.setEnabled(
-            True
-        )
-
-        self.statusBar().showMessage(
-            "Input loaded. Model will be initialized when Calculate is pressed."
-        )
-
-
-    @QtCore.Slot()
-    def _on_model_prepare_thread_finished(
-        self,
-    ) -> None:
-        worker = self.sender()
-
-        if worker is not None:
-            try:
-                worker.deleteLater()
-            except Exception:
-                pass
-
-        if worker is self._model_prepare_worker:
-            self._model_prepare_worker = None
-
 
     def load_input(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -3182,20 +2636,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        
-        self._structure_studio_path = ""
-        self._structure_studio_signature = None
 
         # Set current path early (important if callbacks fire during builder load)
         self._current_path = path
 
-        self._structure_studio_signature = None
-
-        if self._structure_studio is not None:
-            self._structure_studio.set_input_path(
-                path
-            )
-            
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self._sync_block = True
@@ -3205,8 +2649,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._sync_block = False
 
             cfg = read_input_file(path)
-            self._structure_studio_path = ""
-            
+
             # Resolve relative paths relative to the input file location
             base_dir = os.path.dirname(os.path.abspath(path))
             try:
@@ -3239,24 +2682,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self.left_tabs.setCurrentWidget(self.builder)
 
-            # Do not rewrite the loaded input here. The Builder may still be
-            # reconstructing model-specific tables, and an immediate round trip
-            # can remove Wilkens, PAH, or contrast-factor parameters.
-            #
-            # The input will be synchronized when the user edits the Builder,
-            # presses Update input, Save, Calculate, or Run.
+            # Make raw input consistent with resolved paths (optional but robust)
+            self._apply_builder_into_raw()
 
-            self._refresh_structure_view(
-                cfg
-            )
-
-            self.statusBar().showMessage(
-                f"Loaded: {path}"
-            )
-
-            self._start_background_model_preparation(
-                cfg
-            )
+            self._refresh_structure_view(cfg)
+            self.statusBar().showMessage(f"Loaded: {path}")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Load failed", str(e))
@@ -3319,151 +2749,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        self._model_prepare_generation += 1
-        self._prepared_calculation = None
-        self._calculate_model = None
-        self._calculate_model_key = None
         self._current_path = path
         self.save_input()
 
-    def _calculate_model_key_for(
-        self,
-        config: Dict[str, Any],
-        r_exp: np.ndarray,
-        pair_cutoff: float,
-    ):
-        """
-        Return a stable identity key for a reusable PDFCalculator.
-        """
-        structure_file = os.path.abspath(
-            str(config["structure_file"])
-        )
-
-        try:
-            structure_mtime = os.path.getmtime(
-                structure_file
-            )
-        except Exception:
-            structure_mtime = 0.0
-
-        r_exp = np.asarray(
-            r_exp,
-            dtype=float,
-        )
-
-        if r_exp.size > 0:
-            r_first = float(
-                r_exp[0]
-            )
-
-            r_last = float(
-                r_exp[-1]
-            )
-
-            if r_exp.size > 1:
-                r_step = float(
-                    np.median(
-                        np.diff(r_exp)
-                    )
-                )
-            else:
-                r_step = 0.0
-        else:
-            r_first = 0.0
-            r_last = 0.0
-            r_step = 0.0
-
-        return (
-            structure_file,
-            float(structure_mtime),
-            round(
-                float(pair_cutoff),
-                8,
-            ),
-            int(r_exp.size),
-            round(
-                r_first,
-                10,
-            ),
-            round(
-                r_last,
-                10,
-            ),
-            round(
-                r_step,
-                12,
-            ),
-        )
-
-    
-    def _get_or_build_calculate_model(
-        self,
-        config: Dict[str, Any],
-        r_exp: np.ndarray,
-        pair_cutoff: float,
-    ):
-        """
-        Reuse the background-prepared PDFCalculator whenever possible.
-        """
-        from pdf_fitting.models.gr_model import PDFCalculator
-
-        r_exp = np.asarray(
-            r_exp,
-            dtype=float,
-        )
-
-        model_key = self._calculate_model_key_for(
-            config,
-            r_exp,
-            pair_cutoff,
-        )
-
-        if (
-            self._calculate_model is not None
-            and self._calculate_model_key == model_key
-        ):
-            print(
-                "[CALCULATE MODEL] Reusing prepared PDFCalculator."
-            )
-
-            model = self._calculate_model
-
-            model.config = config
-            model.r = r_exp
-            model.r_min = float(
-                config["r_min"]
-            )
-            model.r_max = float(
-                config["r_max"]
-            )
-            model.gr_data_file = config.get(
-                "gr_data_file"
-            )
-
-            return model
-
-        print(
-            "[CALCULATE MODEL] Building a new PDFCalculator."
-        )
-
-        model_start = time.perf_counter()
-
-        model = PDFCalculator(
-            config,
-            config["structure_file"],
-            r_exp,
-            pair_cutoff=pair_cutoff,
-        )
-
-        print(
-            "[CALCULATE MODEL] Model construction took "
-            f"{time.perf_counter() - model_start:.3f} s"
-        )
-
-        self._calculate_model = model
-        self._calculate_model_key = model_key
-
-        return model
     # -------------------------
     # Fit lifecycle
     # -------------------------
@@ -3478,22 +2766,6 @@ class MainWindow(QtWidgets.QMainWindow):
         - updates the PDF plot
         - shows all numeric parameters in the Params tab
         """
-
-        calculate_total_start = time.perf_counter()
-        import_start = time.perf_counter()
-
-        
-
-        from pdf_fitting.fit_engine import (
-            apply_constraints,
-            apply_model_lattice_constraints_to_params,
-        )
-
-        print(
-            "[CALCULATE TIMING] Scientific imports: "
-            f"{time.perf_counter() - import_start:.3f} s"
-        )
-
         if self._worker is not None and self._worker.isRunning():
             QtWidgets.QMessageBox.information(
                 self,
@@ -3530,26 +2802,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Calculating PDF from input values...")
             QtWidgets.QApplication.processEvents()
 
-            config_start = time.perf_counter()
-
-            print(
-                "[CALCULATE TIMING] Read configuration: "
-                f"{time.perf_counter() - config_start:.3f} s"
-            )
             config = read_input_file(tmp.name)
 
             # Load experimental G(r)
-            data_start = time.perf_counter()
-
-            r_exp, G_exp = np.loadtxt(
-                config["gr_data_file"],
-                unpack=True,
-            )
-
-            print(
-                "[CALCULATE TIMING] Load experimental data: "
-                f"{time.perf_counter() - data_start:.3f} s"
-            )
+            r_exp, G_exp = np.loadtxt(config["gr_data_file"], unpack=True)
 
             r_min = float(config.get("r_min", 1.0))
             r_max = float(config.get("r_max", float(np.max(r_exp))))
@@ -3561,79 +2817,15 @@ class MainWindow(QtWidgets.QMainWindow):
             G_exp = G_exp[mask]
 
             # Build model
-            model_start = time.perf_counter()
-
-            pdf_model = self._get_or_build_calculate_model(
+            pdf_model = PDFCalculator(
                 config,
+                config["structure_file"],
                 r_exp,
-                pair_cutoff,
-            )
-
-            print(
-                "[CALCULATE TIMING] Get/build model: "
-                f"{time.perf_counter() - model_start:.3f} s"
+                pair_cutoff=pair_cutoff,
             )
 
             # Input parameters
             params = dict(config.get("initial", {}) or {})
-            refinement_config = (
-                config.get(
-                    "refinement",
-                    {},
-                )
-                or {}
-            )
-
-            selected_microstrain_model = str(
-                refinement_config.get(
-                    "microstrain_model",
-                    "auto",
-                )
-            ).strip().lower()
-
-            contrast_parameters = {}
-
-            for parameter_name, parameter_value in params.items():
-                parameter_name_lower = str(
-                    parameter_name
-                ).strip().lower()
-
-                if (
-                    parameter_name_lower
-                    in {
-                        "cedgea",
-                        "cedgeb",
-                        "cscrewa",
-                        "cscrewb",
-                    }
-                    or re.match(
-                        r"^(edge|screw)[_ ]*e\d+$",
-                        parameter_name_lower,
-                    )
-                ):
-                    contrast_parameters[
-                        str(parameter_name)
-                    ] = parameter_value
-
-            print(
-                "[CALCULATE CONFIG] "
-                f"microstrain_model={selected_microstrain_model}"
-            )
-
-            print(
-                "[CALCULATE CONFIG] "
-                f"rho={params.get('rho', None)}, "
-                f"re={params.get('re', params.get('Re', None))}, "
-                f"fe={params.get('fe', params.get('fE', None))}, "
-                f"pah_a={params.get('pah_a', None)}, "
-                f"pah_b={params.get('pah_b', None)}"
-            )
-
-            print(
-                "[CALCULATE CONFIG] "
-                f"contrast_parameters={contrast_parameters}"
-            )
-
 
             # Apply user constraints, if present
             constraints = config.get("constraints", {}) or {}
@@ -3695,46 +2887,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"(shape factor={calculate_gamma_avg})..."
             )
 
-            prepared = self._prepared_calculation
-
-            can_reuse_prepared_result = (
-                isinstance(
-                    prepared,
-                    dict,
-                )
-                and prepared.get(
-                    "model"
-                )
-                is pdf_model
-                and not compute_pair_contrib
-                and not calculate_gamma_avg
-                and dict(
-                    prepared.get(
-                        "params",
-                        {},
-                    )
-                    or {}
-                )
-                == dict(
-                    params
-                )
+            result = pdf_model.evaluate(
+                params,
+                return_contributions=compute_pair_contrib,
+                compute_gamma_avg=calculate_gamma_avg,
             )
-
-            if can_reuse_prepared_result:
-                print(
-                    "[CALCULATE] Reusing background-prepared result."
-                )
-
-                result = prepared[
-                    "result"
-                ]
-
-            else:
-                result = pdf_model.evaluate(
-                    params,
-                    return_contributions=compute_pair_contrib,
-                    compute_gamma_avg=calculate_gamma_avg,
-                )
 
             print(
                 "[CALCULATE] PDF evaluation completed in "
@@ -3928,12 +3085,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.detach_pdf_plot()
             except Exception:
                 pass
-
-            print(
-                "[CALCULATE TIMING] Total button-to-result time: "
-                f"{time.perf_counter() - calculate_total_start:.3f} s"
-            )
-
 
             self.statusBar().showMessage(
                 f"Calculated PDF from input values. Rwp = {rwp:.3f}%"
@@ -4402,8 +3553,6 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Run a full least-squares refinement in the background worker.
         """
-        from .worker import FitWorker
-
         if self._worker is not None and self._worker.isRunning():
             QtWidgets.QMessageBox.information(
                 self,
@@ -4530,38 +3679,16 @@ class MainWindow(QtWidgets.QMainWindow):
     # Plot updates
     # -------------------------
     def _reset_progress_series(self):
-        self._pdf_best_rwp = float(
-            "inf"
-        )
-
+        self._pdf_best_rwp = float("inf")
         self._rwp_best_by_nfev = {}
-
         self.rwp_x.clear()
         self.rwp_y.clear()
-
-        self.plot_rwp.clear()
-
-        self.plot_rwp.set_title(
-            "Minimization (Rwp vs nfev)"
-        )
-
-        self.plot_rwp.set_xlabel(
-            "nfev"
-        )
-
-        self.plot_rwp.set_ylabel(
-            "Rwp (%)"
-        )
-
-        self.rwp_line = self.plot_rwp.add_curve(
-            [],
-            [],
-            color="#1f77b4",
-            width=1.8,
-        )
-
-        self.plot_rwp.auto_range()
-
+        self.plot_rwp.ax.clear()
+        self.plot_rwp.ax.set_title("Minimization (Rwp vs nfev)")
+        self.plot_rwp.ax.set_xlabel("nfev")
+        self.plot_rwp.ax.set_ylabel("Rwp (%)")
+        (self.rwp_line,) = self.plot_rwp.ax.plot([], [])
+        self.plot_rwp.canvas.draw_idle()
 
     def clear_graphs(self):
         self._reset_progress_series()
@@ -4772,227 +3899,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(e),
             )
 
-    def _current_structure_view_configuration(self):
-        """
-        Return the current input configuration for the structure viewer.
 
-        Builder values are composed without requiring the user to save first.
-        """
-        text = self.raw_editor.toPlainText()
-
-        if self.left_tabs.currentWidget() is self.builder:
-            text = self._compose_input_text_for_run()
-
-        if not text.strip():
-            return None
-
-        temporary_file = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".inp",
-            mode="w",
-            encoding="utf-8",
-        )
-
-        temporary_file.write(
-            text
-        )
-
-        temporary_file.flush()
-        temporary_file.close()
-
-        try:
-            return read_input_file(
-                temporary_file.name
-            )
-
-        finally:
-            try:
-                os.unlink(
-                    temporary_file.name
-                )
-            except Exception:
-                pass
-
-
-    def open_structure_studio(self) -> None:
-        """
-        Open or raise the new GPU structure viewer.
-
-        The PyVista/VTK package is imported only when the user presses
-        VIEW STRUCTURE.
-        """
-        try:
-            configuration = (
-                self._current_structure_view_configuration()
-            )
-
-            if not configuration:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "No structure",
-                    "Load or create an input file first.",
-                )
-                return
-
-            structure_path = str(
-                configuration.get(
-                    "structure_file",
-                    "",
-                )
-                or ""
-            ).strip()
-
-            if not structure_path:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "No structure",
-                    "No structure file is defined in the current input.",
-                )
-                return
-
-            if not os.path.exists(
-                structure_path
-            ):
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Structure file not found",
-                    structure_path,
-                )
-                return
-
-            if self._structure_studio is None:
-                self.statusBar().showMessage(
-                    "Initializing GPU structure viewer..."
-                )
-
-                QtWidgets.QApplication.processEvents()
-
-                from .structure_studio import StructureStudioWindow
-
-                self._structure_studio = StructureStudioWindow(
-                    self
-                )
-
-            parameters = dict(
-                configuration.get(
-                    "initial",
-                    {},
-                )
-                or {}
-            )
-
-            if isinstance(
-                getattr(
-                    self,
-                    "_last_refined_params",
-                    None,
-                ),
-                dict,
-            ):
-                parameters.update(
-                    self._last_refined_params
-                )
-
-            lattice_parameters = {}
-
-            for parameter_name in (
-                "a",
-                "b",
-                "c",
-                "alpha",
-                "beta",
-                "gamma",
-            ):
-                if parameter_name not in parameters:
-                    continue
-
-                try:
-                    lattice_parameters[
-                        parameter_name
-                    ] = float(
-                        parameters[
-                            parameter_name
-                        ]
-                    )
-                except Exception:
-                    pass
-
-            absolute_path = os.path.abspath(
-                structure_path
-            )
-
-            current_input_path = (
-                os.path.abspath(
-                    self._current_path
-                )
-                if self._current_path
-                else ""
-            )
-
-            lattice_signature = tuple(
-                round(
-                    float(
-                        lattice_parameters.get(
-                            key,
-                            np.nan,
-                        )
-                    ),
-                    10,
-                )
-                for key in (
-                    "a",
-                    "b",
-                    "c",
-                    "alpha",
-                    "beta",
-                    "gamma",
-                )
-            )
-
-            studio_signature = (
-                absolute_path,
-                current_input_path,
-                lattice_signature,
-            )
-
-            should_reload = (
-                self._structure_studio.structure is None
-                or studio_signature
-                != getattr(
-                    self,
-                    "_structure_studio_signature",
-                    None,
-                )
-            )
-
-            if should_reload:
-                self.statusBar().showMessage(
-                    "Loading structure into GPU viewer..."
-                )
-
-                QtWidgets.QApplication.processEvents()
-
-                self._structure_studio.load_structure(
-                    structure_path,
-                    lattice_params=lattice_parameters,
-                    input_path=self._current_path,
-                )
-
-                self._structure_studio_path = absolute_path
-                self._structure_studio_signature = studio_signature
-                
-            self._structure_studio.show_and_raise()
-
-            self.statusBar().showMessage(
-                "GPU structure viewer opened."
-            )
-
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Structure viewer failed",
-                str(exc),
-            )
     
     def _refresh_residual_offset(self):
         pass
@@ -5467,12 +4374,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         try:
             self.plot_pdf.canvas.draw()
-
-            self.plot_warren.canvas.draw_idle()
-            self.plot_size.canvas.draw_idle()
-
+            self.plot_warren.canvas.draw()
+            self.plot_size.canvas.draw()
             QtWidgets.QApplication.processEvents()
-
         except Exception:
             pass
 
@@ -5821,257 +4725,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_warren_plot()
 
     def _refresh_warren_plot(self) -> None:
-        self._draw_warren_fast(
-            self.plot_warren
-        )
-
-    def _draw_warren_fast(
-        self,
-        plot: FastLinePlot,
-    ) -> None:
-        plot.clear()
-
-        y_mode = getattr(
-            self,
-            "_warren_y_mode",
-            "warren",
-        )
-
-        cache = getattr(
-            self,
-            "_warren_display_cache",
-            {},
-        ) or {}
-
-        if y_mode == "warren":
-            plot.set_title(
-                "Warren plot"
-            )
-            plot.set_ylabel(
-                "sqrt(<ΔL²>) (Å)"
-            )
-            y_key = "y_warren"
-        else:
-            plot.set_title(
-                "Microstrain plot"
-            )
-            plot.set_ylabel(
-                "sqrt(<ΔL²>)/L"
-            )
-            y_key = "y_microstrain"
-
-        plot.set_xlabel(
-            "L (Å)"
-        )
-
-        if not cache:
-            plot.show_message(
-                "No Warren-strain data available."
-            )
-            self._warren_current_keys = []
-            return
-
-        keys = list(
-            getattr(
-                self,
-                "_warren_selected_keys",
-                [],
-            )
-            or []
-        )
-
-        if not keys:
-            keys = self._default_warren_keys_min_mid_max()
-
-        keys = [
-            direction
-            for direction in keys
-            if direction in cache
-        ]
-
-        self._warren_current_keys = list(
-            keys
-        )
-
-        if not keys:
-            plot.show_message(
-                "No selected Warren directions."
-            )
-            return
-
-        style = getattr(
-            self,
-            "_warren_style",
-            {},
-        ) or {}
-
-        direction_style = getattr(
-            self,
-            "_warren_dir_style",
-            {},
-        ) or {}
-
-        marker = style.get(
-            "marker",
-            "o",
-        )
-
-        line_style = style.get(
-            "linestyle",
-            "-",
-        )
-
-        plotted = False
-
-        for index, direction in enumerate(keys):
-            information = cache.get(
-                direction,
-                {},
-            ) or {}
-
-            L = np.asarray(
-                information.get(
-                    "L",
-                    [],
-                ),
-                dtype=float,
-            )
-
-            y_values = np.asarray(
-                information.get(
-                    y_key,
-                    [],
-                ),
-                dtype=float,
-            )
-
-            valid = (
-                np.isfinite(L)
-                & np.isfinite(y_values)
-            )
-
-            L = L[valid]
-            y_values = y_values[valid]
-
-            if L.size == 0:
-                continue
-
-            color = _safe_mpl_color(
-                (
-                    direction_style.get(
-                        direction,
-                        {},
-                    )
-                    or {}
-                ).get(
-                    "color",
-                    "",
-                ),
-                _COLOR_CYCLE[
-                    index % len(_COLOR_CYCLE)
-                ],
-            )
-
-            plot.add_curve(
-                L,
-                y_values,
-                color=color,
-                width=float(
-                    style.get(
-                        "linewidth",
-                        1.5,
-                    )
-                ),
-                name=information.get(
-                    "label",
-                    self._warren_label(direction),
-                ),
-                symbol=marker,
-                symbol_size=float(
-                    style.get(
-                        "markersize",
-                        5.0,
-                    )
-                ),
-                style=line_style,
-            )
-
-            plotted = True
-
-        if not plotted:
-            plot.show_message(
-                "No plottable Warren data for selected directions."
-            )
-            return
-
-        plot.auto_range()
-
-        def _optional_float(value):
-            try:
-                text = str(value).strip()
-
-                if not text:
-                    return None
-
-                return float(text)
-
-            except Exception:
-                return None
-
-        xmin = _optional_float(
-            style.get(
-                "xmin",
-                "",
-            )
-        )
-
-        xmax = _optional_float(
-            style.get(
-                "xmax",
-                "",
-            )
-        )
-
-        ymin = _optional_float(
-            style.get(
-                "ymin",
-                "",
-            )
-        )
-
-        ymax = _optional_float(
-            style.get(
-                "ymax",
-                "",
-            )
-        )
-
-        try:
-            current_range = plot.plot_widget.viewRange()
-
-            if xmin is not None or xmax is not None:
-                plot.set_x_range(
-                    xmin
-                    if xmin is not None
-                    else current_range[0][0],
-                    xmax
-                    if xmax is not None
-                    else current_range[0][1],
-                )
-
-            if ymin is not None or ymax is not None:
-                plot.set_y_range(
-                    ymin
-                    if ymin is not None
-                    else current_range[1][0],
-                    ymax
-                    if ymax is not None
-                    else current_range[1][1],
-                )
-
-        except Exception:
-            pass
-
+        self._draw_warren_on_ax(self.plot_warren.ax)
+        self.plot_warren.canvas.draw_idle()
 
     def save_warren_txt(self) -> None:
         """Save currently displayed Warren/microstrain data to a tab-separated text file."""
@@ -6848,10 +5503,6 @@ class MainWindow(QtWidgets.QMainWindow):
         This is intentionally separate from normal Calculate/Run, because full-range
         tick metadata can be large for high r_max.
         """
-
-        from pdf_fitting.models.gr_model import PDFCalculator
-        from pdf_fitting.fit_engine import apply_constraints
-
         try:
             txt = self._compose_input_text_for_run()
 
@@ -6972,9 +5623,6 @@ class MainWindow(QtWidgets.QMainWindow):
         For default local trends, use pair_cutoff ≈ 10 Å.
         For full-range local trends, use pair_cutoff ≈ d or r_max.
         """
-
-        from pdf_fitting.models.gr_model import PDFCalculator
-
         try:
             structure_file = str(cfg.get("structure_file", "") or "").strip()
 
@@ -7481,244 +6129,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return None
 
-    def _plot_size_dist(
-        self,
-        size: Dict[str, Any],
-    ) -> None:
-        """
-        Display the crystallite-size distribution using PyQtGraph.
-        """
-        self.plot_size.clear()
+    def _plot_size_dist(self, size: Dict[str, Any]):
+        ax = self.plot_size.ax
+        ax.clear()
+        label = str(size.get("label", "Crystallite size"))
+        xlabel = str(size.get("xlabel", "D"))
 
-        if not isinstance(
-            size,
-            dict,
-        ):
-            self.plot_size.set_title(
-                "Crystallite size distribution"
-            )
-
-            self.plot_size.show_message(
-                "No size-distribution data available."
-            )
-
+        ax.set_title(f"{label} distribution (lognormal)")
+        if not size or "x" not in size or "pdf" not in size or len(size.get("x", [])) == 0:
+            ax.text(0.5, 0.5, "No size-distribution data available for this model/parameter set.",
+                    transform=ax.transAxes, ha="center", va="center")
+            ax.grid(False)
+            self.plot_size.canvas.draw_idle()
             return
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("PDF")
+        ax.plot(size["x"], size["pdf"], marker="o", linestyle="-")
+        if "mean" in size and "std" in size:
+            ax.text(0.02, 0.95, f"mean={size['mean']:.3g}, std={size['std']:.3g}",
+                    transform=ax.transAxes, va="top")
+        ax.grid(True, linestyle=":")
+        self.plot_size.canvas.draw_idle()
 
-        x_values = np.asarray(
-            size.get(
-                "x",
-                [],
-            ),
-            dtype=float,
-        )
-
-        probability = np.asarray(
-            size.get(
-                "pdf",
-                [],
-            ),
-            dtype=float,
-        )
-
-        valid = (
-            np.isfinite(x_values)
-            & np.isfinite(probability)
-        )
-
-        x_values = x_values[
-            valid
-        ]
-
-        probability = probability[
-            valid
-        ]
-
-        if (
-            x_values.size == 0
-            or probability.size == 0
-            or x_values.size != probability.size
-        ):
-            self.plot_size.set_title(
-                "Crystallite size distribution"
-            )
-
-            self.plot_size.show_message(
-                "No size-distribution data are available for "
-                "this model or parameter set."
-            )
-
-            return
-
-        order = np.argsort(
-            x_values
-        )
-
-        x_values = x_values[
-            order
-        ]
-
-        probability = probability[
-            order
-        ]
-
-        label = str(
-            size.get(
-                "label",
-                "Crystallite size",
-            )
-        )
-
-        x_label = str(
-            size.get(
-                "xlabel",
-                "D (Å)",
-            )
-        )
-
-        self.plot_size.set_title(
-            f"{label} distribution (lognormal)"
-        )
-
-        self.plot_size.set_xlabel(
-            x_label
-        )
-
-        self.plot_size.set_ylabel(
-            "Probability density"
-        )
-
-        self.plot_size.add_curve(
-            x_values,
-            probability,
-            color="#1f77b4",
-            width=2.0,
-            name=label,
-            fill_level=0.0,
-            fill_color="#1f77b4",
-            fill_alpha=45,
-        )
-
-        information_parts = []
-
-        try:
-            mean_value = float(
-                size.get(
-                    "mean",
-                    np.nan,
-                )
-            )
-
-            if np.isfinite(
-                mean_value
-            ):
-                information_parts.append(
-                    f"mean = {mean_value:.6g}"
-                )
-
-        except Exception:
-            pass
-
-        try:
-            standard_deviation = float(
-                size.get(
-                    "std",
-                    np.nan,
-                )
-            )
-
-            if np.isfinite(
-                standard_deviation
-            ):
-                information_parts.append(
-                    f"standard deviation = "
-                    f"{standard_deviation:.6g}"
-                )
-
-        except Exception:
-            pass
-
-        try:
-            mu_value = float(
-                size.get(
-                    "mu",
-                    np.nan,
-                )
-            )
-
-            if np.isfinite(
-                mu_value
-            ):
-                information_parts.append(
-                    f"lognormal μ = {mu_value:.6g}"
-                )
-
-        except Exception:
-            pass
-
-        try:
-            sigma_value = float(
-                size.get(
-                    "sigma",
-                    np.nan,
-                )
-            )
-
-            if np.isfinite(
-                sigma_value
-            ):
-                information_parts.append(
-                    f"lognormal σ = {sigma_value:.6g}"
-                )
-
-        except Exception:
-            pass
-
-        self.plot_size.set_info(
-            "    ".join(
-                information_parts
-            )
-        )
-
-        x_minimum = float(
-            np.min(
-                x_values
-            )
-        )
-
-        x_maximum = float(
-            np.max(
-                x_values
-            )
-        )
-
-        y_maximum = float(
-            np.max(
-                probability
-            )
-        )
-
-        x_padding = max(
-            0.02 * (
-                x_maximum
-                - x_minimum
-            ),
-            1.0e-12,
-        )
-
-        self.plot_size.set_x_range(
-            x_minimum - x_padding,
-            x_maximum + x_padding,
-        )
-
-        self.plot_size.set_y_range(
-            0.0,
-            max(
-                1.05 * y_maximum,
-                1.0e-12,
-            ),
-        )
-
-        
     @QtCore.Slot(str)
     def on_failed(self, message: str):
         self.btn_calculate.setEnabled(True)
@@ -7746,20 +6178,6 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         finally:
             self._returning_pdf_to_main = False
-
-        try:
-            if self.structure_view is not None:
-                self.structure_view.close()
-        except Exception:
-            pass
-
-        try:
-            if self._structure_studio is not None:
-                self._structure_studio.shutdown()
-                self._structure_studio = None
-        except Exception:
-            pass
-
 
         super().closeEvent(event)
 
@@ -7880,13 +6298,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def open_warren_plot_window(self) -> None:
         """
-        Open the GPU-capable Warren plot in a separate window.
+        Open Warren plot in a separate window.
+
+        The separate window also has Display options and Refresh buttons.
         """
-        if not getattr(
-            self,
-            "_warren_display_cache",
-            None,
-        ):
+        if not getattr(self, "_warren_display_cache", None):
             QtWidgets.QMessageBox.information(
                 self,
                 "No Warren data",
@@ -7894,93 +6310,58 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Warren plot")
-
-        dialog.setWindowFlags(
-            dialog.windowFlags()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Warren plot")
+        dlg.setWindowFlags(
+            dlg.windowFlags()
             | Qt.Window
             | Qt.WindowMinimizeButtonHint
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
         )
+        dlg.resize(1100, 750)
 
-        dialog.resize(
-            1100,
-            750,
-        )
+        plot = MplPlot(title="Warren plot")
 
-        plot = FastLinePlot(
-            title="Warren plot",
-            xlabel="L (Å)",
-            ylabel="Warren broadening",
-        )
+        btn_options = QtWidgets.QPushButton("Display options")
+        btn_refresh = QtWidgets.QPushButton("Refresh")
 
-        button_options = QtWidgets.QPushButton(
-            "Display options"
-        )
+        try:
+            plot.toolbar.addSeparator()
+            plot.toolbar.addWidget(btn_options)
+            plot.toolbar.addWidget(btn_refresh)
+        except Exception:
+            pass
 
-        button_refresh = QtWidgets.QPushButton(
-            "Refresh"
-        )
-
-        plot.toolbar.addSeparator()
-        plot.toolbar.addWidget(
-            button_options
-        )
-        plot.toolbar.addWidget(
-            button_refresh
-        )
-
-        layout = QtWidgets.QVBoxLayout(
-            dialog
-        )
-
-        layout.setContentsMargins(
-            0,
-            0,
-            0,
-            0,
-        )
-
-        layout.addWidget(
-            plot
-        )
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(plot)
 
         def redraw():
-            self._draw_warren_fast(
-                plot
-            )
+            self._draw_warren_on_ax(plot.ax)
+            plot.canvas.draw_idle()
 
         def open_options():
-            options_dialog = WarrenDisplayOptionsDialog(
-                self
-            )
+            opt = WarrenDisplayOptionsDialog(self)
 
-            if (
-                options_dialog.exec()
-                == QtWidgets.QDialog.Accepted
-            ):
-                options_dialog.apply_to_owner()
+            if opt.exec() == QtWidgets.QDialog.Accepted:
+                opt.apply_to_owner()
 
+                # Refresh main plot and this separate plot.
                 self._refresh_warren_plot()
                 redraw()
 
-        button_options.clicked.connect(
-            open_options
-        )
-
-        button_refresh.clicked.connect(
-            redraw
-        )
+        btn_options.clicked.connect(open_options)
+        btn_refresh.clicked.connect(redraw)
 
         redraw()
 
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
-        self._warren_dialog_window = dialog
+        self._warren_dialog_window = dlg
+
 
     def _apply_axis_limits_from_style(self, ax, style: Dict[str, Any]) -> None:
         def _float_or_none(x):
@@ -8138,723 +6519,195 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_local_trends_plot()
     
     def _refresh_local_trends_plot(self) -> None:
-        self._draw_local_trends_fast(
-            self.plot_local_trends
-        )
-
-    def _draw_local_trends_fast(
-        self,
-        plot: FastLinePlot,
-    ) -> None:
-        plot.clear()
-
-        trends = getattr(
-            self,
-            "_local_trends",
-            {},
-        ) or {}
-
-        max_range = None
-
-        try:
-            for pair_data in trends.values():
-                if (
-                    isinstance(
-                        pair_data,
-                        dict,
-                    )
-                    and "max_r_plot" in pair_data
-                ):
-                    max_range = float(
-                        pair_data["max_r_plot"]
-                    )
-                    break
-
-        except Exception:
-            max_range = None
-
-        if (
-            max_range is not None
-            and np.isfinite(max_range)
-        ):
-            plot.set_title(
-                "Local dynamics: λ coefficients and δ continuation "
-                f"(up to {max_range:.3g} Å)"
-            )
-        else:
-            plot.set_title(
-                "Local dynamics: λ coefficients and δ continuation"
-            )
-
-        plot.set_xlabel(
-            "Pair distance r (Å)"
-        )
-
-        plot.set_ylabel(
-            "λk or δ1/r + δ2/r²"
-        )
-
-        if not trends:
-            plot.show_message(
-                "No local trend data available."
-            )
-            return
-
-        selected_pairs = getattr(
-            self,
-            "_local_selected_pairs",
-            None,
-        )
-
-        if selected_pairs is None:
-            pairs = sorted(
-                trends.keys()
-            )
-        else:
-            pairs = [
-                pair
-                for pair in sorted(trends.keys())
-                if pair in selected_pairs
-            ]
-
-        display_mode = getattr(
-            self,
-            "_local_display_mode",
-            "both",
-        )
-
-        style = getattr(
-            self,
-            "_local_style",
-            {},
-        ) or {}
-
-        pair_style = getattr(
-            self,
-            "_local_pair_style",
-            {},
-        ) or {}
-
-        lambda_marker = style.get(
-            "lambda_marker",
-            "o",
-        )
-
-        delta_marker = style.get(
-            "delta_marker",
-            "x",
-        )
-
-        lambda_line = style.get(
-            "lambda_linestyle",
-            "-",
-        )
-
-        delta_line = style.get(
-            "delta_linestyle",
-            "--",
-        )
-
-        plotted = False
-
-        for row, pair in enumerate(pairs):
-            data = trends.get(
-                pair,
-                {},
-            ) or {}
-
-            try:
-                r_values = np.asarray(
-                    data.get(
-                        "r",
-                        [],
-                    ),
-                    dtype=float,
-                )
-
-                lambda_values = np.asarray(
-                    data.get(
-                        "lambda",
-                        [],
-                    ),
-                    dtype=float,
-                )
-
-                delta_values = np.asarray(
-                    data.get(
-                        "delta_eff",
-                        [],
-                    ),
-                    dtype=float,
-                )
-
-            except Exception:
-                continue
-
-            if (
-                r_values.size == 0
-                or lambda_values.size != r_values.size
-                or delta_values.size != r_values.size
-            ):
-                continue
-
-            order = np.argsort(
-                r_values
-            )
-
-            r_values = r_values[order]
-            lambda_values = lambda_values[order]
-            delta_values = delta_values[order]
-
-            finite_r = np.isfinite(
-                r_values
-            )
-
-            lambda_mask = (
-                finite_r
-                & np.isfinite(lambda_values)
-            )
-
-            delta_mask = (
-                finite_r
-                & ~np.isfinite(lambda_values)
-                & np.isfinite(delta_values)
-            )
-
-            color = _safe_mpl_color(
-                (
-                    pair_style.get(
-                        pair,
-                        {},
-                    )
-                    or {}
-                ).get(
-                    "color",
-                    "",
-                ),
-                standard_pair_color(
-                    pair,
-                    row,
-                ),
-            )
-
-            if (
-                display_mode in (
-                    "both",
-                    "lambda",
-                )
-                and np.any(lambda_mask)
-            ):
-                plot.add_curve(
-                    r_values[lambda_mask],
-                    lambda_values[lambda_mask],
-                    color=color,
-                    width=float(
-                        style.get(
-                            "linewidth",
-                            1.5,
-                        )
-                    ),
-                    name=f"{pair} λ",
-                    symbol=lambda_marker,
-                    symbol_size=float(
-                        style.get(
-                            "markersize",
-                            5.0,
-                        )
-                    ),
-                    style=lambda_line,
-                )
-
-                plotted = True
-
-            if (
-                display_mode in (
-                    "both",
-                    "delta",
-                )
-                and np.any(delta_mask)
-            ):
-                plot.add_curve(
-                    r_values[delta_mask],
-                    delta_values[delta_mask],
-                    color=color,
-                    width=float(
-                        style.get(
-                            "linewidth",
-                            1.5,
-                        )
-                    ),
-                    name=f"{pair} δ",
-                    symbol=delta_marker,
-                    symbol_size=float(
-                        style.get(
-                            "markersize",
-                            5.0,
-                        )
-                    ),
-                    style=delta_line,
-                )
-
-                plotted = True
-
-        if not plotted:
-            plot.show_message(
-                "No lambda or delta values are available "
-                "for the selected display mode."
-            )
-            return
-
-        plot.auto_range()
-
-        def _optional_float(value):
-            try:
-                text = str(value).strip()
-
-                if not text:
-                    return None
-
-                return float(text)
-
-            except Exception:
-                return None
-
-        xmin = _optional_float(
-            style.get(
-                "xmin",
-                "",
-            )
-        )
-
-        xmax = _optional_float(
-            style.get(
-                "xmax",
-                "",
-            )
-        )
-
-        ymin = _optional_float(
-            style.get(
-                "ymin",
-                "",
-            )
-        )
-
-        ymax = _optional_float(
-            style.get(
-                "ymax",
-                "",
-            )
-        )
-
-        try:
-            current_range = plot.plot_widget.viewRange()
-
-            if xmin is not None or xmax is not None:
-                plot.set_x_range(
-                    xmin
-                    if xmin is not None
-                    else current_range[0][0],
-                    xmax
-                    if xmax is not None
-                    else current_range[0][1],
-                )
-
-            if ymin is not None or ymax is not None:
-                plot.set_y_range(
-                    ymin
-                    if ymin is not None
-                    else current_range[1][0],
-                    ymax
-                    if ymax is not None
-                    else current_range[1][1],
-                )
-
-        except Exception:
-            pass
+        self._draw_local_trends_on_ax(self.plot_local_trends.ax)
+        self.plot_local_trends.canvas.draw_idle()
 
 
     def open_local_plot_window(self) -> None:
-        if not getattr(
-            self,
-            "_local_trends",
-            None,
-        ):
+        if not getattr(self, "_local_trends", None):
             QtWidgets.QMessageBox.information(
                 self,
                 "No local dynamics data",
                 "No local dynamics data are available yet.",
             )
             return
-
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(
-            "Local dynamics trends"
-        )
-
-        dialog.setWindowFlags(
-            dialog.windowFlags()
+    
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Local dynamics trends")
+        dlg.setWindowFlags(
+            dlg.windowFlags()
             | Qt.Window
             | Qt.WindowMinimizeButtonHint
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
         )
-
-        dialog.resize(
-            1000,
-            700,
-        )
-
-        plot = FastLinePlot(
-            title="Local dynamics trends",
-            xlabel="Pair distance r (Å)",
-            ylabel="λ or δ continuation",
-        )
-
-        button_options = QtWidgets.QPushButton(
-            "Display options"
-        )
-
-        button_refresh = QtWidgets.QPushButton(
-            "Refresh"
-        )
-
-        plot.toolbar.addSeparator()
-        plot.toolbar.addWidget(
-            button_options
-        )
-        plot.toolbar.addWidget(
-            button_refresh
-        )
-
-        layout = QtWidgets.QVBoxLayout(
-            dialog
-        )
-
-        layout.setContentsMargins(
-            0,
-            0,
-            0,
-            0,
-        )
-
-        layout.addWidget(
-            plot
-        )
-
-        def redraw():
-            self._draw_local_trends_fast(
-                plot
-            )
-
-        def open_options():
-            options_dialog = LocalDynamicsDisplayOptionsDialog(
-                self
-            )
-
-            if (
-                options_dialog.exec()
-                == QtWidgets.QDialog.Accepted
-            ):
-                options_dialog.apply_to_owner()
-
-                self._refresh_local_trends_plot()
-                redraw()
-
-        button_options.clicked.connect(
-            open_options
-        )
-
-        button_refresh.clicked.connect(
-            redraw
-        )
-
-        redraw()
-
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-        self._local_dialog_window = dialog
-
+        dlg.resize(1000, 700)
+    
+        plot = MplPlot(title="Local dynamics trends")
+    
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(plot)
+    
+        self._draw_local_trends_on_ax(plot.ax)
+        plot.canvas.draw_idle()
+    
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+    
+        self._local_dialog_window = dlg
 
     def _update_cs_grid_plots(self) -> None:
         """
-        Update GPU-capable crystallite-shape grid-search plots.
+        Update CS grid-search diagnostic plots.
 
         Plots:
-            1. Best Rwp versus diameter.
-            2. Best Rwp versus axis length.
-            3. Rwp heatmap over diameter and axis length.
+            1. best Rwp vs diameter
+            2. best Rwp vs axis length
+            3. Rwp heatmap over diameter/axis length
         """
-        rows = list(
-            getattr(
-                self,
-                "_cs_results",
-                [],
-            )
-            or []
-        )
+        rows = list(getattr(self, "_cs_results", []) or [])
 
         if not rows:
-            self.plot_cs_diameter.clear()
-            self.plot_cs_height.clear()
-            self.plot_cs_map.clear()
             return
 
-        diameter = np.asarray(
-            [
-                row.get(
-                    "diameter_cells",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
-        )
+        d = np.asarray([r["diameter_cells"] for r in rows], dtype=float)
+        h = np.asarray([r["height_cells"] for r in rows], dtype=float)
+        rwp = np.asarray([r["rwp"] for r in rows], dtype=float)
 
-        height = np.asarray(
-            [
-                row.get(
-                    "height_cells",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
-        )
+        # ---------------------------------------------------------
+        # Rwp vs diameter
+        # ---------------------------------------------------------
+        ax = self.plot_cs_diameter.ax
+        ax.clear()
+        ax.set_title("Final Rwp vs diameter")
+        ax.set_xlabel("Diameter / unit cells")
+        ax.set_ylabel("Best Rwp (%)")
+        ax.grid(True, linestyle=":")
 
-        rwp = np.asarray(
-            [
-                row.get(
-                    "rwp",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
-        )
+        finite_d = np.isfinite(d)
 
-        valid = (
-            np.isfinite(height)
-            & np.isfinite(rwp)
-        )
+        if np.any(finite_d):
+            unique_d = np.asarray(sorted(set(d[finite_d])), dtype=float)
+            y = []
 
-        diameter_valid = (
-            valid
-            & np.isfinite(diameter)
-        )
+            for dv in unique_d:
+                mask = d == dv
+                y.append(float(np.nanmin(rwp[mask])))
 
-        self.plot_cs_diameter.clear()
-        self.plot_cs_diameter.set_title(
-            "Final Rwp vs diameter"
-        )
-        self.plot_cs_diameter.set_xlabel(
-            "Diameter / unit cells"
-        )
-        self.plot_cs_diameter.set_ylabel(
-            "Best Rwp (%)"
-        )
-
-        if np.any(diameter_valid):
-            unique_diameter = np.asarray(
-                sorted(
-                    set(
-                        diameter[diameter_valid].tolist()
-                    )
-                ),
-                dtype=float,
+            ax.plot(unique_d, y, marker="o", linestyle="-")
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "Diameter treated as infinite.",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
             )
 
-            best_rwp_by_diameter = np.asarray(
-                [
-                    float(
-                        np.nanmin(
-                            rwp[
-                                diameter_valid
-                                & np.isclose(
-                                    diameter,
-                                    diameter_value,
-                                )
-                            ]
-                        )
-                    )
-                    for diameter_value in unique_diameter
+        self.plot_cs_diameter.canvas.draw_idle()
+
+        # ---------------------------------------------------------
+        # Rwp vs height
+        # ---------------------------------------------------------
+        ax = self.plot_cs_height.ax
+        ax.clear()
+        ax.set_title("Final Rwp vs axis length")
+        ax.set_xlabel("Axis length / unit cells")
+        ax.set_ylabel("Best Rwp (%)")
+        ax.grid(True, linestyle=":")
+
+        unique_h = np.asarray(sorted(set(h)), dtype=float)
+        y = []
+
+        for hv in unique_h:
+            mask = h == hv
+            y.append(float(np.nanmin(rwp[mask])))
+
+        ax.plot(unique_h, y, marker="o", linestyle="-")
+
+        self.plot_cs_height.canvas.draw_idle()
+
+        # ---------------------------------------------------------
+        # Heatmap
+        # ---------------------------------------------------------
+        ax = self.plot_cs_map.ax
+        ax.clear()
+        ax.set_title("CS grid search Rwp map")
+        ax.set_xlabel("Diameter / unit cells")
+        ax.set_ylabel("Axis length / unit cells")
+
+        if np.any(finite_d):
+            unique_d = np.asarray(sorted(set(d[finite_d])), dtype=float)
+            unique_h = np.asarray(sorted(set(h)), dtype=float)
+
+            Z = np.full((len(unique_h), len(unique_d)), np.nan, dtype=float)
+
+            for row in rows:
+                dv = float(row["diameter_cells"])
+                hv = float(row["height_cells"])
+                rv = float(row["rwp"])
+
+                if not np.isfinite(dv):
+                    continue
+
+                i_arr = np.where(unique_h == hv)[0]
+                j_arr = np.where(unique_d == dv)[0]
+
+                if i_arr.size == 0 or j_arr.size == 0:
+                    continue
+
+                i = int(i_arr[0])
+                j = int(j_arr[0])
+
+                if np.isnan(Z[i, j]) or rv < Z[i, j]:
+                    Z[i, j] = rv
+
+
+            if len(unique_d) < 2 or len(unique_h) < 2:
+                ax.scatter(d, h, c=rwp, s=80)
+                ax.set_title("Finite-shape fit result")
+                ax.set_xlabel("Diameter / unit cells")
+                ax.set_ylabel("Axis length / unit cells")
+
+                try:
+                    for dv, hv, rv in zip(d, h, rwp):
+                        ax.text(float(dv), float(hv), f"{float(rv):.3f}%", ha="center", va="bottom")
+                except Exception:
+                    pass
+                
+                self.plot_cs_map.canvas.draw_idle()
+                return
+
+
+            im = ax.imshow(
+                Z,
+                origin="lower",
+                aspect="auto",
+                extent=[
+                    float(unique_d.min()),
+                    float(unique_d.max()),
+                    float(unique_h.min()),
+                    float(unique_h.max()),
                 ],
-                dtype=float,
+                interpolation="nearest",
             )
 
-            self.plot_cs_diameter.add_curve(
-                unique_diameter,
-                best_rwp_by_diameter,
-                color="#1f77b4",
-                width=2.0,
-                symbol="o",
-                symbol_size=7.0,
-                style="-",
-                name="Best Rwp",
-            )
-
-            self.plot_cs_diameter.auto_range()
+            ax.figure.colorbar(im, ax=ax, label="Rwp (%)")
 
         else:
-            self.plot_cs_diameter.show_message(
-                "Diameter is treated as infinite."
+            ax.text(
+                0.5,
+                0.5,
+                "Diameter infinite: heatmap not applicable.\nUse Rwp vs axis length.",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
             )
 
-        self.plot_cs_height.clear()
-        self.plot_cs_height.set_title(
-            "Final Rwp vs axis length"
-        )
-        self.plot_cs_height.set_xlabel(
-            "Axis length / unit cells"
-        )
-        self.plot_cs_height.set_ylabel(
-            "Best Rwp (%)"
-        )
-
-        if np.any(valid):
-            unique_height = np.asarray(
-                sorted(
-                    set(
-                        height[valid].tolist()
-                    )
-                ),
-                dtype=float,
-            )
-
-            best_rwp_by_height = np.asarray(
-                [
-                    float(
-                        np.nanmin(
-                            rwp[
-                                valid
-                                & np.isclose(
-                                    height,
-                                    height_value,
-                                )
-                            ]
-                        )
-                    )
-                    for height_value in unique_height
-                ],
-                dtype=float,
-            )
-
-            self.plot_cs_height.add_curve(
-                unique_height,
-                best_rwp_by_height,
-                color="#d62728",
-                width=2.0,
-                symbol="o",
-                symbol_size=7.0,
-                style="-",
-                name="Best Rwp",
-            )
-
-            self.plot_cs_height.auto_range()
-
-        else:
-            self.plot_cs_height.show_message(
-                "No valid axis-length results."
-            )
-
-        self.plot_cs_map.clear()
-        self.plot_cs_map.set_title(
-            "CS grid search Rwp map"
-        )
-        self.plot_cs_map.set_xlabel(
-            "Diameter / unit cells"
-        )
-        self.plot_cs_map.set_ylabel(
-            "Axis length / unit cells"
-        )
-
-        if not np.any(diameter_valid):
-            return
-
-        unique_diameter = np.asarray(
-            sorted(
-                set(
-                    diameter[diameter_valid].tolist()
-                )
-            ),
-            dtype=float,
-        )
-
-        unique_height = np.asarray(
-            sorted(
-                set(
-                    height[diameter_valid].tolist()
-                )
-            ),
-            dtype=float,
-        )
-
-        z_values = np.full(
-            (
-                unique_height.size,
-                unique_diameter.size,
-            ),
-            np.nan,
-            dtype=float,
-        )
-
-        for diameter_value, height_value, rwp_value in zip(
-            diameter[diameter_valid],
-            height[diameter_valid],
-            rwp[diameter_valid],
-        ):
-            diameter_index = int(
-                np.argmin(
-                    np.abs(
-                        unique_diameter
-                        - diameter_value
-                    )
-                )
-            )
-
-            height_index = int(
-                np.argmin(
-                    np.abs(
-                        unique_height
-                        - height_value
-                    )
-                )
-            )
-
-            previous = z_values[
-                height_index,
-                diameter_index,
-            ]
-
-            if (
-                not np.isfinite(previous)
-                or rwp_value < previous
-            ):
-                z_values[
-                    height_index,
-                    diameter_index,
-                ] = float(
-                    rwp_value
-                )
-
-        if (
-            unique_diameter.size >= 2
-            and unique_height.size >= 2
-        ):
-            self.plot_cs_map.set_grid(
-                unique_diameter,
-                unique_height,
-                z_values,
-            )
-
-        else:
-            self.plot_cs_map.set_points(
-                diameter[diameter_valid],
-                height[diameter_valid],
-                rwp[diameter_valid],
-            )
+        self.plot_cs_map.canvas.draw_idle()
 
     def _current_shape_search_mode(self) -> str:
         try:

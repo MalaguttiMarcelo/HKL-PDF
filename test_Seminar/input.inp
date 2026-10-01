@@ -1,9 +1,9 @@
 [files]
-structure_file = Z:/Softwares/pdf_fitting_project/data/Fe_bcc_300K.cif
-gr_data_file = Z:/Softwares/pdf_fitting_project/data/FeCr_ID31.xy
+structure_file = Z:/Softwares/pdf_fitting_project/test_Seminar/Fe_bcc_300K.cif
+gr_data_file = Z:/Softwares/pdf_fitting_project/test_Seminar/FeCr_ID31.xy
 
 [range]
-r_min = 2.0
+r_min = 1.0
 r_max = 150.0
 
 [pair_generation]
@@ -11,12 +11,6 @@ r_extension = 1.2
 
 [refinement]
 staged_refinement = false
-refinement_r_step_final = 0.01
-max_nfev_final = 60
-ftol = 0.001
-xtol = 0.001
-gtol = 0.001
-progress_every_sec = 0.5
 microstrain_model = wilkens
 saxs_enabled = false
 saxs_model = sphere
@@ -25,39 +19,48 @@ saxs_apply_qmax = true
 compute_pair_contributions_on_finish = true
 compute_warren_on_finish = true
 compute_local_trends_on_finish = true
-export_finite_coordination = false
+export_finite_coordination = true
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+shell_backend = cpu
+pdf_backend = cpu
+gpu_device = 0
+gpu_memory_fraction = 0.7
 
 [initial_values]
-scale = 0.27436764907058575
-a = 2.8684620622791703
-b = 2.8684620622791703
-c = 2.8684620622791703
-alpha = 90.0
-beta = 90.0
-gamma = 90.0
+scale = 0.2605419647298457
 qdamp = 0.011485099495637478
 delta_broad = 0.0014090180673610453
 qmax = 20.0
 qmax_zeros = 5.0
-biso_fe = 0.3051413519141072
-d = 98.7144702757019
-d_std = 45.70974245071322
+d = 143.62778713429884
+d_std = 44.934957349251285
+a = 2.8684348512532662
+b = 2.8684348512532662
+c = 2.8684348512532662
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
 x_fe1 = 0.0
 y_fe1 = 0.0
 z_fe1 = 0.0
 occ_fe1 = 1.0
-biso_Fe = 0.3051413519141072
-fe = 0.6205768522025261
+biso_Fe = 0.29784393114666047
+delta2 = 0.3471678337326417
+rho = 0.0001772567961519241
+re = 153.65
+fe = 0.6426988066174981
 CEdgeA = 0.26528
 CEdgeB = -0.35595
 CScrewA = 0.307288
 CScrewB = -0.819979
-rho = 0.00022
-re = 98.7144702757019
-lambda_fe0plus-fe0plus_0 = 0.488
-lambda_fe0plus-fe0plus_1 = 0.004
-lambda_fe0plus-fe0plus_2 = 0.101
-lambda_fe0plus-fe0plus_3 = 0.0
+lambda_fe0plus-fe0plus_0 = 0.433
+lambda_fe0plus-fe0plus_1 = 0.025
+lambda_fe0plus-fe0plus_2 = 0.105
 
 [refinable_parameters]
 scale = true
@@ -71,7 +74,6 @@ qdamp = false
 delta_broad = false
 qmax = false
 qmax_zeros = false
-biso_fe = true
 d = true
 d_std = true
 x_fe1 = false
@@ -79,28 +81,29 @@ y_fe1 = false
 z_fe1 = false
 occ_fe1 = false
 biso_Fe = true
+delta2 = true
+rho = true
+re = false
 fe = true
 CEdgeA = false
 CEdgeB = false
 CScrewA = false
 CScrewB = false
-rho = false
-re = false
 lambda_fe0plus-fe0plus_0 = true
 lambda_fe0plus-fe0plus_1 = true
 lambda_fe0plus-fe0plus_2 = true
-lambda_fe0plus-fe0plus_3 = true
 
 [bounds]
+a = 0.0, 
+d = 0.0, 150.0
+d_std = 0.0, 100.0
 biso_Fe = 0.0, 10.0
-fe = 0.0, 1.0
+delta2 = 0.0, 
 lambda_fe0plus-fe0plus_0 = 0.000, 1.000
-lambda_fe0plus-fe0plus_1 = 0.000, 1.000
-lambda_fe0plus-fe0plus_2 = 0.000, 1.000
-lambda_fe0plus-fe0plus_3 = 0.000, 1.000
+lambda_fe0plus-fe0plus_1 = -1.000, 1.000
+lambda_fe0plus-fe0plus_2 = -1.000, 1.000
 
 [constraints]
-re = d
 
 [crystallite_shape]
 mode = conventional

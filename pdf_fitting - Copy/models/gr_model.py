@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import hashlib
-import json
 
 try:
     from numba import get_num_threads
@@ -29,7 +27,6 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 from pdf_fitting.structure_handler import StructureHandler
 from pdf_fitting.models.microstrain_utils import contrast_factor, fstar_vec, feature_vector_hkl
-from pdf_fitting.user_paths import user_cache_dir
 
 # If you added Cell in microstrain_utils, import it; otherwise define a tiny fallback.
 try:
@@ -45,12 +42,6 @@ except Exception:
         alpha: float = 90.0
         beta: float = 90.0
         gamma: float = 90.0
-
-CONTRAST_FEATURE_CACHE_DIR = user_cache_dir(
-    "contrast_feature_cache"
-)
-
-CONTRAST_FEATURE_CACHE_VERSION = "contrast_feature_matrix_v1"
 
 
 def clean_element_name(name: str) -> str:
@@ -440,18 +431,7 @@ class PDFCalculator:
         self.pair_cutoff = float(pair_cutoff) if pair_cutoff is not None else self.r_max * self.r_extension
 
         # Structure + shells
-        self.structure_handler = StructureHandler(
-            structure_file,
-            self.pair_cutoff,
-            backend_config=(
-                config.get(
-                    "refinement",
-                    {},
-                )
-                or {}
-            ),
-        )
-
+        self.structure_handler = StructureHandler(structure_file, self.pair_cutoff)
         self.constraints = self.structure_handler.get_constraints()
         # Prefer packed shell table arrays (fast load, avoids Python dict overhead)
         shell_table = None
@@ -545,100 +525,6 @@ class PDFCalculator:
         self._local_trends_cache_key = None
         self._local_trends_cache_value = None
 
-        # ------------------------------------------------------------------
-        # Optional resident CUDA PDF backend.
-        # ------------------------------------------------------------------
-        self._pdf_backend_requested = str(
-            (
-                config.get(
-                    "refinement",
-                    {},
-                )
-                or {}
-            ).get(
-                "pdf_backend",
-                "cpu",
-            )
-        ).strip().lower()
-
-        self._pdf_backend_active = "cpu"
-        self._cuda_pdf_backend = None
-
-        if self._pdf_backend_requested in (
-            "cuda",
-            "gpu",
-            "cupy",
-            "auto",
-        ):
-            try:
-                from pdf_fitting.models.gpu.backend import (
-                    gpu_summary,
-                    resolve_backend,
-                )
-
-                self._pdf_backend_active = resolve_backend(
-                    self._pdf_backend_requested,
-                    default="cpu",
-                )
-
-                if self._pdf_backend_active == "cuda":
-                    gpu_device = int(
-                        (
-                            config.get(
-                                "refinement",
-                                {},
-                            )
-                            or {}
-                        ).get(
-                            "gpu_device",
-                            0,
-                        )
-                    )
-
-                    from pdf_fitting.models.gpu.resident_pdf import (
-                        CudaResidentPdfBackend,
-                    )
-
-                    self._cuda_pdf_backend = CudaResidentPdfBackend(
-                        shell_frac=self._shell_frac,
-                        shell_pair_id=self._shell_pair_id,
-                        shell_alpha_id=self._shell_alpha_id,
-                        shell_beta_id=self._shell_beta_id,
-                        shell_mult_eff=self._shell_mult_eff,
-                        strain_unique_dirs=self._strain_unique_dirs,
-                        strain_inv_dirs=self._strain_inv_dirs,
-                        n_pairs=self._n_pairs,
-                        device_id=gpu_device,
-                    )
-
-                    print(
-                        "[CUDA PDF] "
-                        + gpu_summary(
-                            gpu_device
-                        )
-                    )
-
-            except Exception as exc:
-                if self._pdf_backend_requested in (
-                    "cuda",
-                    "gpu",
-                    "cupy",
-                ):
-                    raise
-
-                self._pdf_backend_active = "cpu"
-                self._cuda_pdf_backend = None
-
-                print(
-                    "[CUDA PDF] Falling back to CPU: "
-                    f"{exc}"
-                )
-
-        print(
-            "[PDF BACKEND] "
-            f"requested={self._pdf_backend_requested}, "
-            f"active={self._pdf_backend_active}"
-        )
 
     def _init_composition_constants(self) -> None:
         species = [clean_element_name(str(site.specie)) for site in self.structure_handler.structure.sites]
@@ -1971,13 +1857,8 @@ class PDFCalculator:
         saxs_is_enabled = self._saxs_enabled(
             params
         )
-        if saxs_is_enabled:
-            if cart is None:
-                cart = (
-                    self._shell_frac
-                    @ M.T
-                )
 
+        if saxs_is_enabled:
             gamma_saxs = self._compute_saxs_gamma_weighted(
                 params,
                 r32,
@@ -2125,17 +2006,6 @@ class PDFCalculator:
         self._local_trends_cache_key = None
         self._local_trends_cache_value = None
 
-        if self._cuda_pdf_backend is not None:
-            self._cuda_pdf_backend.replace_shell_table(
-                shell_frac=self._shell_frac,
-                shell_pair_id=self._shell_pair_id,
-                shell_alpha_id=self._shell_alpha_id,
-                shell_beta_id=self._shell_beta_id,
-                shell_mult_eff=self._shell_mult_eff,
-                strain_unique_dirs=self._strain_unique_dirs,
-                strain_inv_dirs=self._strain_inv_dirs,
-                n_pairs=self._n_pairs,
-            )
 
     def shape_function(self, r, d, dstd):
         """
@@ -2302,152 +2172,29 @@ class PDFCalculator:
 
     def _prepare_contrast_factor_matrix(self) -> None:
         """
-        Build or load the invariant feature matrix for all unique strain
+        Precompute the invariant feature matrix X(hkl) for all unique strain
         directions.
 
-        The matrix depends on:
-            - space-group number
-            - unit-cell metric
-            - the unique direction array
-            - the feature-matrix implementation version
+        Then during refinement:
+            C_edge  = X @ E_edge
+            C_screw = X @ E_screw
+            Chkl    = fE*C_edge + (1-fE)*C_screw
 
-        It is cached because building it with feature_vector_hkl() for millions
-        of directions is expensive.
+        This replaces a very slow Python loop over ~10^6 directions.
+        The matrix is built once using the initial lattice/cell.
         """
         self._cf_feature_names = []
         self._cf_feature_matrix = None
 
         try:
-            dirs = getattr(
-                self,
-                "_strain_unique_dirs",
-                None,
-            )
-
-            if dirs is None:
+            dirs = getattr(self, "_strain_unique_dirs", None)
+            if dirs is None or len(dirs) == 0:
                 return
 
-            dirs = np.ascontiguousarray(
-                dirs,
-                dtype=np.int32,
-            )
+            dirs = np.asarray(dirs, dtype=np.int32)
 
-            if dirs.shape[0] == 0:
-                return
-
-            cell_values = (
-                float(self.cell.a),
-                float(self.cell.b),
-                float(self.cell.c),
-                float(self.cell.alpha),
-                float(self.cell.beta),
-                float(self.cell.gamma),
-            )
-
-            digest = hashlib.md5()
-
-            digest.update(
-                CONTRAST_FEATURE_CACHE_VERSION.encode(
-                    "utf-8"
-                )
-            )
-
-            digest.update(
-                str(
-                    int(self.spacegroup_number)
-                ).encode(
-                    "utf-8"
-                )
-            )
-
-            digest.update(
-                np.asarray(
-                    cell_values,
-                    dtype=np.float64,
-                ).tobytes()
-            )
-
-            digest.update(
-                np.asarray(
-                    dirs.shape,
-                    dtype=np.int64,
-                ).tobytes()
-            )
-
-            digest.update(
-                dirs.tobytes()
-            )
-
-            cache_key = digest.hexdigest()
-
-            matrix_path = os.path.join(
-                CONTRAST_FEATURE_CACHE_DIR,
-                f"contrast_features_{cache_key}.npy",
-            )
-
-            metadata_path = os.path.join(
-                CONTRAST_FEATURE_CACHE_DIR,
-                f"contrast_features_{cache_key}.json",
-            )
-
-            if (
-                os.path.exists(matrix_path)
-                and os.path.exists(metadata_path)
-            ):
-                try:
-                    with open(
-                        metadata_path,
-                        "r",
-                        encoding="utf-8",
-                    ) as file:
-                        metadata = json.load(file)
-
-                    feature_names = list(
-                        metadata.get(
-                            "feature_names",
-                            [],
-                        )
-                    )
-
-                    matrix = np.load(
-                        matrix_path,
-                        mmap_mode="r",
-                        allow_pickle=False,
-                    )
-
-                    if (
-                        matrix.ndim == 2
-                        and matrix.shape[0] == dirs.shape[0]
-                        and matrix.shape[1] == len(feature_names)
-                    ):
-                        self._cf_feature_names = feature_names
-                        self._cf_feature_matrix = matrix
-
-                        print(
-                            "[PDF] Loaded cached Chkl feature matrix: "
-                            f"{matrix.shape[0]:,} direction(s) x "
-                            f"{matrix.shape[1]} term(s)."
-                        )
-
-                        return
-
-                except Exception as exc:
-                    print(
-                        "[PDF] Could not load cached Chkl feature "
-                        f"matrix: {exc}"
-                    )
-
-            print(
-                "[PDF] Building Chkl feature matrix for "
-                f"{dirs.shape[0]:,} unique direction(s)..."
-            )
-
-            build_start = time.perf_counter()
-
-            h0 = int(dirs[0, 0])
-            k0 = int(dirs[0, 1])
-            l0 = int(dirs[0, 2])
-
+            # Use first direction to get term names / matrix width.
+            h0, k0, l0 = int(dirs[0, 0]), int(dirs[0, 1]), int(dirs[0, 2])
             names0, x0 = feature_vector_hkl(
                 int(self.spacegroup_number),
                 h0,
@@ -2456,132 +2203,38 @@ class PDFCalculator:
                 self.cell,
             )
 
-            n_directions = int(dirs.shape[0])
+            n_dir = int(dirs.shape[0])
             n_terms = int(len(names0))
 
-            matrix = np.zeros(
-                (
-                    n_directions,
-                    n_terms,
-                ),
-                dtype=np.float32,
-            )
+            X = np.zeros((n_dir, n_terms), dtype=np.float32)
+            X[0, :] = np.asarray(x0, dtype=np.float32)
 
-            matrix[0, :] = np.asarray(
-                x0,
-                dtype=np.float32,
-            )
-
-            for index in range(
-                1,
-                n_directions,
-            ):
-                h = int(dirs[index, 0])
-                k = int(dirs[index, 1])
-                l = int(dirs[index, 2])
+            for i in range(1, n_dir):
+                h, k, l = int(dirs[i, 0]), int(dirs[i, 1]), int(dirs[i, 2])
 
                 try:
-                    names_i, values_i = feature_vector_hkl(
+                    names_i, x_i = feature_vector_hkl(
                         int(self.spacegroup_number),
                         h,
                         k,
                         l,
                         self.cell,
                     )
-
-                    matrix[index, :] = np.asarray(
-                        values_i,
-                        dtype=np.float32,
-                    )
-
+                    X[i, :] = np.asarray(x_i, dtype=np.float32)
                 except Exception:
+                    # Leave row as zero if something is invalid.
                     pass
 
             self._cf_feature_names = list(names0)
-            self._cf_feature_matrix = matrix
+            self._cf_feature_matrix = X
 
             print(
-                "[PDF] Built Chkl feature matrix: "
-                f"{n_directions:,} direction(s) x "
-                f"{n_terms} term(s) in "
-                f"{time.perf_counter() - build_start:.3f} s."
+                f"[PDF] Precomputed Chkl feature matrix: "
+                f"{n_dir} direction(s) x {n_terms} term(s)."
             )
 
-            try:
-                temporary_matrix_path = (
-                    matrix_path
-                    + ".tmp.npy"
-                )
-
-                np.save(
-                    temporary_matrix_path,
-                    matrix,
-                    allow_pickle=False,
-                )
-
-                os.replace(
-                    temporary_matrix_path,
-                    matrix_path,
-                )
-
-                temporary_metadata_path = (
-                    metadata_path
-                    + ".tmp"
-                )
-
-                with open(
-                    temporary_metadata_path,
-                    "w",
-                    encoding="utf-8",
-                ) as file:
-                    json.dump(
-                        {
-                            "cache_version": (
-                                CONTRAST_FEATURE_CACHE_VERSION
-                            ),
-                            "spacegroup_number": int(
-                                self.spacegroup_number
-                            ),
-                            "cell": [
-                                float(value)
-                                for value in cell_values
-                            ],
-                            "n_directions": int(
-                                n_directions
-                            ),
-                            "n_terms": int(
-                                n_terms
-                            ),
-                            "feature_names": list(
-                                names0
-                            ),
-                        },
-                        file,
-                        indent=2,
-                    )
-
-                os.replace(
-                    temporary_metadata_path,
-                    metadata_path,
-                )
-
-                print(
-                    "[PDF] Saved Chkl feature matrix cache: "
-                    f"{matrix_path}"
-                )
-
-            except Exception as exc:
-                print(
-                    "[PDF] Could not save Chkl feature matrix "
-                    f"cache: {exc}"
-                )
-
-        except Exception as exc:
-            print(
-                "[WARN] Could not prepare Chkl feature matrix: "
-                f"{exc}"
-            )
-
+        except Exception as e:
+            print(f"[WARN] Could not precompute Chkl feature matrix: {e}")
             self._cf_feature_names = []
             self._cf_feature_matrix = None
 
@@ -2797,16 +2450,7 @@ class PDFCalculator:
         has_screw = self._has_cf_params_or_config(params, "screw")
         has_cubic_ab = self._has_cubic_cf_params(params)
         if not has_edge and not has_screw and not has_cubic_ab:
-            print(
-                "[WARNING] Directional microstrain is active, but no "
-                "EdgeE*, ScrewE*, CEdgeA/B, or CScrewA/B parameters "
-                "were found. The directional strain contribution is zero."
-            )
-
-            return np.zeros(
-                dirs.shape[0],
-                dtype=self._dtype,
-            )
+            return np.zeros(dirs.shape[0], dtype=self._dtype)
 
         # ---------------------------------------------------------
         # Case 1: legacy cubic contrast-factor formula
@@ -4043,118 +3687,19 @@ class PDFCalculator:
         pah_a = float(params.get("pah_a", params.get("PAH_a", 0.0)))
         pah_b = float(params.get("pah_b", params.get("PAH_b", 0.0)))
 
-        if microstrain_model in (
-            "wilkens",
-            "wilkins",
-            "dislocation",
-        ):
-            wilkens_active = (
-                rho > 0.0
-                and Re > 0.0
-            )
+        if microstrain_model in ("wilkens", "wilkins", "dislocation"):
+            wilkens_active = rho > 0.0 and Re > 0.0
             pah_active = False
 
-        elif microstrain_model in (
-            "pah",
-            "adler-houska",
-            "adler_houska",
-        ):
+        elif microstrain_model in ("pah", "adler-houska", "adler_houska"):
             wilkens_active = False
-            pah_active = (
-                pah_a != 0.0
-                or pah_b != 0.0
-            )
-
-        elif microstrain_model in (
-            "isotropic",
-            "iso",
-            "delta_g",
-            "none",
-            "off",
-        ):
-            wilkens_active = False
-            pah_active = False
+            pah_active = (pah_a != 0.0 or pah_b != 0.0)
 
         else:
-            wilkens_active = (
-                rho > 0.0
-                and Re > 0.0
-            )
-
-            pah_active = (
-                not wilkens_active
-                and (
-                    pah_a != 0.0
-                    or pah_b != 0.0
-                )
-            )
-        # ---------------------------------------------------------
-        # Directional Wilkens/PAH models require contrast factors.
-        #
-        # Without EdgeE*, ScrewE*, CEdgeA/B, or CScrewA/B, the
-        # current directional factor is identically zero. Avoid
-        # allocating and processing millions of direction rows.
-        # ---------------------------------------------------------
-        has_directional_contrast = (
-            self._has_cubic_cf_params(
-                params
-            )
-            or self._has_cf_params_or_config(
-                params,
-                "edge",
-            )
-            or self._has_cf_params_or_config(
-                params,
-                "screw",
-            )
-        )
-
-        if (
-            (wilkens_active or pah_active)
-            and not has_directional_contrast
-        ):
-            wilkens_active = False
-            pah_active = False
-
-            if not getattr(
-                self,
-                "_printed_missing_contrast_skip",
-                False,
-            ):
-                self._printed_missing_contrast_skip = True
-
-                print(
-                    "[MICROSTRAIN] Directional model selected without "
-                    "contrast coefficients. Skipping the zero-valued "
-                    "directional strain calculation."
-                )
-
-        model_state_key = (
-            microstrain_model,
-            bool(wilkens_active),
-            bool(pah_active),
-        )
-
-        if getattr(
-            self,
-            "_last_printed_microstrain_state",
-            None,
-        ) != model_state_key:
-            self._last_printed_microstrain_state = (
-                model_state_key
-            )
-
-            print(
-                "[MICROSTRAIN] "
-                f"model={microstrain_model}, "
-                f"wilkens_active={wilkens_active}, "
-                f"pah_active={pah_active}, "
-                f"rho={rho}, "
-                f"Re={Re}, "
-                f"fE={fE}, "
-                f"pah_a={pah_a}, "
-                f"pah_b={pah_b}"
-            )
+            # Backward-compatible auto behavior:
+            # old inputs with rho/re still use Wilkens.
+            wilkens_active = rho > 0.0 and Re > 0.0
+            pah_active = (not wilkens_active) and (pah_a != 0.0 or pah_b != 0.0)
 
         # Fast Warren-only path.
         # Do this before norm, correlation, sigma, Gaussian accumulation,
@@ -4170,75 +3715,11 @@ class PDFCalculator:
         # norm for PDF
         norm = 4.0 * np.pi * self.rho0
 
-        # ---------------------------------------------------------
-        # Shell distances.
-        #
-        # CUDA mode keeps Cartesian vectors and distances resident on
-        # the GPU. A host distance copy is currently returned because
-        # the existing lambda/delta correlation code still uses r_ij.
-        # ---------------------------------------------------------
-        M = lattice_matrix(
-            *lattice_tuple
-        ).astype(
-            self._dtype,
-            copy=False,
-        )
-
-        use_cuda_pdf = (
-            self._pdf_backend_active == "cuda"
-            and self._cuda_pdf_backend is not None
-        )
-
-        need_cartesian_on_cpu = (
-            cylinder_common_volume_active
-            or self._saxs_enabled(
-                params
-            )
-        )
-
-        if use_cuda_pdf:
-            if need_cartesian_on_cpu:
-                (
-                    r_ij,
-                    cart,
-                ) = self._cuda_pdf_backend.compute_distances(
-                    M,
-                    return_cartesian=True,
-                )
-
-            else:
-                r_ij = self._cuda_pdf_backend.compute_distances(
-                    M,
-                    return_cartesian=False,
-                )
-
-                cart = None
-
-            r_ij = np.asarray(
-                r_ij,
-                dtype=self._dtype,
-            )
-
-        else:
-            cart = (
-                self._shell_frac
-                @ M.T
-            )
-
-            r_ij = np.sqrt(
-                np.sum(
-                    cart
-                    * cart,
-                    axis=1,
-                )
-            ).astype(
-                self._dtype,
-                copy=False,
-            )
-
-        _mark(
-            "distances"
-        )
+        # --- vectorized distances r_ij from fractional vectors ---
+        M = lattice_matrix(*lattice_tuple).astype(self._dtype, copy=False)
+        cart = self._shell_frac @ M.T
+        r_ij = np.sqrt(np.sum(cart * cart, axis=1)).astype(self._dtype, copy=False)
+        _mark("distances")
 
         cylinder_shell_gamma = None
 
@@ -4426,420 +3907,177 @@ class PDFCalculator:
         #   - order of the vector, e.g. [110], [220], [330]
         #
         # The L-dependence comes only from fstar(L/Re) and L^2.
-        if use_cuda_pdf:
-            # ---------------------------------------------------------
-            # CUDA directional-strain setup.
-            # ---------------------------------------------------------
-            directional_mode = "none"
-            feature_matrix = None
-            edge_coefficients = None
-            screw_coefficients = None
-            edge_present = False
-            screw_present = False
-            cubic_coefficients = None
+        strain_L2 = np.zeros_like(r_ij, dtype=self._dtype)
+
+        if wilkens_active or pah_active:
+            uniq_dirs = getattr(self, "_strain_unique_dirs", None)
+            inv_dirs = getattr(self, "_strain_inv_dirs", None)
+
+            if uniq_dirs is None or inv_dirs is None:
+                dirs_i32 = self._shell_direction.astype(np.int32, copy=False)
+                uniq_dirs, inv_dirs = np.unique(
+                    dirs_i32,
+                    axis=0,
+                    return_inverse=True,
+                )
+                uniq_dirs = uniq_dirs.astype(np.int32, copy=False)
+                inv_dirs = inv_dirs.astype(np.int32, copy=False)
+
+            # This returns the invariant directional factor.
+            # For invariant coefficients, this already includes:
+            #     (d_hkl^4 / a^4) * Gamma_hkl
+            Chkl_u = self._compute_chkl_unique_dirs_fast(params, float(fE))
+            strainINV = Chkl_u[inv_dirs].astype(self._dtype, copy=False)
 
             if wilkens_active:
-                directional_mode = "wilkens"
+                # Burgers magnitude
+                params_lc = self._params_lc(params)
+                bmag = self._pfloat(
+                    params_lc,
+                    ("burgers_mag", "burgers", "b_mag", "b"),
+                    0.0,
+                )
+
+                if bmag <= 0.0:
+                    # Backward-compatible default.
+                    bmag = np.sqrt(3.0) / 2.0 * float(lattice_tuple[0])
+
+                fstar_vals = fstar_vec(
+                    r_ij.astype(float),
+                    Re,
+                ).astype(self._dtype, copy=False)
+
+                eps2 = (
+                    self._dtype(rho)
+                    * (self._dtype(bmag) ** 2)
+                    / self._dtype(4.0 * np.pi)
+                ) * strainINV * fstar_vals
+
+                strain_L2 = (r_ij * r_ij) * eps2
+
+                if not getattr(self, "_printed_wilkens_diag", False):
+                    self._printed_wilkens_diag = True
+
+                    def _safe_stats(name, arr):
+                        arr = np.asarray(arr, dtype=float)
+                        arr = arr[np.isfinite(arr)]
+                        if arr.size == 0:
+                            print(f"[WILKENS DIAG] {name}: no finite values")
+                            return
+                        print(
+                            f"[WILKENS DIAG] {name}: "
+                            f"min={np.min(arr):.6g}, "
+                            f"max={np.max(arr):.6g}, "
+                            f"mean={np.mean(arr):.6g}, "
+                            f"median={np.median(arr):.6g}"
+                        )
+
+                    print("[WILKENS DIAG] ----")
+                    print(f"[WILKENS DIAG] rho={rho}, Re={Re}, fE={fE}, bmag={bmag}")
+                    print(f"[WILKENS DIAG] unique Chkl dirs={len(Chkl_u)}, shell rows={len(r_ij)}")
+                    _safe_stats("strainINV / Chkl", strainINV)
+                    _safe_stats("fstar", fstar_vals)
+                    _safe_stats("eps2", eps2)
+                    _safe_stats("strain_L2", strain_L2)
+                    print("[WILKENS DIAG] ----")
 
             elif pah_active:
-                directional_mode = "pah"
-
-            if directional_mode != "none":
-                edge_present = self._has_cf_params_or_config(
-                    params,
-                    "edge",
+                # PAH equation 10:
+                #
+                #   <eps^2_hkl(L)> =
+                #       (d_hkl^4 / a^4) Gamma_hkl * (pah_a / L + pah_b)
+                #
+                # The PDF Gaussian peak variance uses:
+                #
+                #   sigma_strain^2 = L^2 * <eps^2_hkl(L)>
+                #
+                # Therefore:
+                #
+                #   sigma_PAH^2 =
+                #       (d_hkl^4 / a^4) Gamma_hkl * (pah_a * L + pah_b * L^2)
+                #
+                strain_L2 = strainINV * (
+                    self._dtype(pah_a) * r_ij
+                    + self._dtype(pah_b) * r_ij * r_ij
                 )
 
-                screw_present = self._has_cf_params_or_config(
-                    params,
-                    "screw",
-                )
+                # Avoid negative variance if refinement temporarily makes PAH term negative.
+                strain_L2 = np.maximum(strain_L2, self._dtype(0.0))
 
-                if self._has_cubic_cf_params(
-                    params
-                ):
-                    cubic_coefficients = self._cubic_cf_coeffs(
-                        params
-                    )
+                if not getattr(self, "_printed_pah_diag", False):
+                    self._printed_pah_diag = True
 
-                else:
-                    if self._cf_feature_matrix is None:
-                        self._prepare_contrast_factor_matrix()
-
-                    feature_matrix = self._cf_feature_matrix
-
-                    if feature_matrix is not None:
-                        edge_coefficients = self._contrast_coeff_vector(
-                            params,
-                            "edge",
+                    def _safe_stats(name, arr):
+                        arr = np.asarray(arr, dtype=float)
+                        arr = arr[np.isfinite(arr)]
+                        if arr.size == 0:
+                            print(f"[PAH DIAG] {name}: no finite values")
+                            return
+                        print(
+                            f"[PAH DIAG] {name}: "
+                            f"min={np.min(arr):.6g}, "
+                            f"max={np.max(arr):.6g}, "
+                            f"mean={np.mean(arr):.6g}, "
+                            f"median={np.median(arr):.6g}"
                         )
 
-                        screw_coefficients = self._contrast_coeff_vector(
-                            params,
-                            "screw",
-                        )
+                    print("[PAH DIAG] ----")
+                    print(f"[PAH DIAG] pah_a={pah_a}, pah_b={pah_b}, fE={fE}")
+                    print(f"[PAH DIAG] unique invariant dirs={len(Chkl_u)}, shell rows={len(r_ij)}")
+                    _safe_stats("strainINV", strainINV)
+                    _safe_stats("strain_L2", strain_L2)
+                    print("[PAH DIAG] ----")
 
-            params_lc = self._params_lc(
-                params
-            )
+        _mark("wilkens_strain")
+        sigma2 = (
+            self._dtype(1.0 / (4.0 * np.pi ** 2)) * biso_avg * corr
+            + (self._dtype(delta_g) * r_ij) ** 2
+            + (self._dtype(delta_broad) * r_ij) ** 2
+            + strain_L2
+        )
+        sigma = np.sqrt(np.maximum(sigma2, self._dtype(1e-24))).astype(self._dtype, copy=False)
+        _mark("sigma")
 
-            burgers_magnitude = self._pfloat(
-                params_lc,
-                (
-                    "burgers_mag",
-                    "burgers",
-                    "b_mag",
-                    "b",
-                ),
-                0.0,
-            )
+        # --- normalization A_ij (vectorized) ---
+        rho_beta = densities_vec[self._shell_beta_id]
+        # Use alpha-site-averaged multiplicity for correct normalization.
+        # For simple structures this is equal to shell_mult.
+        # For multi-site species, e.g. Li4GeS4 with Li1/Li2/Li3 and S1/S2/S3,
+        # this prevents overcounting inequivalent alpha sites.
+        shell_mult_norm = getattr(self, "_shell_mult_eff", None)
 
-            if burgers_magnitude <= 0.0:
-                burgers_magnitude = (
-                    np.sqrt(3.0)
-                    / 2.0
-                    * float(
-                        lattice_tuple[0]
-                    )
-                )
-
-            shell_amplitude_factor = None
-
-            if cylinder_shell_gamma is not None:
-                shell_amplitude_factor = np.asarray(
-                    cylinder_shell_gamma,
-                    dtype=np.float32,
-                )
-
-            t_cuda_physics = time.perf_counter()
-
-            self._cuda_pdf_backend.prepare_sigma_amplitude(
-                correlation=corr,
-                biso_by_species=biso_vals_vec,
-                density_by_species=densities_vec,
-                delta_g=delta_g,
-                delta_broad=delta_broad,
-                directional_mode=directional_mode,
-                feature_matrix=feature_matrix,
-                edge_coefficients=edge_coefficients,
-                screw_coefficients=screw_coefficients,
-                edge_present=edge_present,
-                screw_present=screw_present,
-                edge_fraction=fE,
-                cubic_coefficients=cubic_coefficients,
-                rho=rho,
-                Re=Re,
-                burgers_magnitude=burgers_magnitude,
-                pah_a=pah_a,
-                pah_b=pah_b,
-                shell_amplitude_factor=shell_amplitude_factor,
-            )
-
-            _mark(
-                "cuda_strain+sigma+Aij"
-            )
-
-            g_by_pair = self._cuda_pdf_backend.accumulate(
-                r32
-            ).astype(
-                self._dtype,
-                copy=False,
-            )
-
-            _mark(
-                "gaussian_accumulation"
-            )
-
+        if shell_mult_norm is None:
+            shell_mult_norm = self._shell_mult.astype(self._dtype, copy=False)
         else:
-            # ---------------------------------------------------------
-            # Existing CPU directional strain path.
-            # ---------------------------------------------------------
-            strain_L2 = np.zeros_like(
-                r_ij,
+            shell_mult_norm = np.asarray(shell_mult_norm, dtype=self._dtype)
+
+        A_ij = shell_mult_norm / (
+            self._dtype(4.0 * np.pi)
+            * np.maximum(r_ij * r_ij, self._dtype(1e-24))
+            * np.maximum(rho_beta.astype(self._dtype, copy=False), self._dtype(1e-30))
+        )
+
+        if cylinder_shell_gamma is not None:
+            A_ij = A_ij * np.asarray(
+                cylinder_shell_gamma,
                 dtype=self._dtype,
             )
 
-            if wilkens_active or pah_active:
-                uniq_dirs = getattr(
-                    self,
-                    "_strain_unique_dirs",
-                    None,
-                )
+        # --- accumulate partial g_ab(r) with Numba (parallel) ---
+        # --- accumulate partial g_ab(r) with Numba (parallel; shell-block kernel) ---
+        g_by_pair = np.zeros((self._n_pairs, r32.size), dtype=self._dtype)
+        if get_num_threads is None:
+            # Fallback to pair-parallel kernel if Numba threading API unavailable
+            accumulate_gaussians_by_pair(r32, r_ij, sigma, A_ij, self._pair_offsets, g_by_pair)
+        else:
+            nblk = int(get_num_threads())
+            if nblk < 1:
+                nblk = 1
+            partial = np.zeros((nblk, self._n_pairs, r32.size), dtype=self._dtype)
+            accumulate_gaussians_by_shell_blocks(r32, r_ij, sigma, A_ij, self._shell_pair_id, partial)
+            g_by_pair[:] = partial.sum(axis=0)
 
-                inv_dirs = getattr(
-                    self,
-                    "_strain_inv_dirs",
-                    None,
-                )
-
-                if (
-                    uniq_dirs is None
-                    or inv_dirs is None
-                ):
-                    dirs_i32 = self._shell_direction.astype(
-                        np.int32,
-                        copy=False,
-                    )
-
-                    (
-                        uniq_dirs,
-                        inv_dirs,
-                    ) = np.unique(
-                        dirs_i32,
-                        axis=0,
-                        return_inverse=True,
-                    )
-
-                    uniq_dirs = uniq_dirs.astype(
-                        np.int32,
-                        copy=False,
-                    )
-
-                    inv_dirs = inv_dirs.astype(
-                        np.int32,
-                        copy=False,
-                    )
-
-                Chkl_u = self._compute_chkl_unique_dirs_fast(
-                    params,
-                    float(
-                        fE
-                    ),
-                )
-
-                strainINV = Chkl_u[
-                    inv_dirs
-                ].astype(
-                    self._dtype,
-                    copy=False,
-                )
-
-                if wilkens_active:
-                    params_lc = self._params_lc(
-                        params
-                    )
-
-                    bmag = self._pfloat(
-                        params_lc,
-                        (
-                            "burgers_mag",
-                            "burgers",
-                            "b_mag",
-                            "b",
-                        ),
-                        0.0,
-                    )
-
-                    if bmag <= 0.0:
-                        bmag = (
-                            np.sqrt(3.0)
-                            / 2.0
-                            * float(
-                                lattice_tuple[0]
-                            )
-                        )
-
-                    fstar_vals = fstar_vec(
-                        r_ij.astype(
-                            float
-                        ),
-                        Re,
-                    ).astype(
-                        self._dtype,
-                        copy=False,
-                    )
-
-                    eps2 = (
-                        self._dtype(
-                            rho
-                        )
-                        * (
-                            self._dtype(
-                                bmag
-                            )
-                            ** 2
-                        )
-                        / self._dtype(
-                            4.0
-                            * np.pi
-                        )
-                    ) * strainINV * fstar_vals
-
-                    strain_L2 = (
-                        r_ij
-                        * r_ij
-                    ) * eps2
-
-                elif pah_active:
-                    strain_L2 = strainINV * (
-                        self._dtype(
-                            pah_a
-                        )
-                        * r_ij
-                        + self._dtype(
-                            pah_b
-                        )
-                        * r_ij
-                        * r_ij
-                    )
-
-                    strain_L2 = np.maximum(
-                        strain_L2,
-                        self._dtype(
-                            0.0
-                        ),
-                    )
-
-            _mark(
-                "wilkens_strain"
-            )
-
-            sigma2 = (
-                self._dtype(
-                    1.0
-                    / (
-                        4.0
-                        * np.pi ** 2
-                    )
-                )
-                * biso_avg
-                * corr
-                + (
-                    self._dtype(
-                        delta_g
-                    )
-                    * r_ij
-                ) ** 2
-                + (
-                    self._dtype(
-                        delta_broad
-                    )
-                    * r_ij
-                ) ** 2
-                + strain_L2
-            )
-
-            sigma = np.sqrt(
-                np.maximum(
-                    sigma2,
-                    self._dtype(
-                        1.0e-24
-                    ),
-                )
-            ).astype(
-                self._dtype,
-                copy=False,
-            )
-
-            _mark(
-                "sigma"
-            )
-
-            rho_beta = densities_vec[
-                self._shell_beta_id
-            ]
-
-            shell_mult_norm = getattr(
-                self,
-                "_shell_mult_eff",
-                None,
-            )
-
-            if shell_mult_norm is None:
-                shell_mult_norm = self._shell_mult.astype(
-                    self._dtype,
-                    copy=False,
-                )
-            else:
-                shell_mult_norm = np.asarray(
-                    shell_mult_norm,
-                    dtype=self._dtype,
-                )
-
-            A_ij = shell_mult_norm / (
-                self._dtype(
-                    4.0
-                    * np.pi
-                )
-                * np.maximum(
-                    r_ij
-                    * r_ij,
-                    self._dtype(
-                        1.0e-24
-                    ),
-                )
-                * np.maximum(
-                    rho_beta.astype(
-                        self._dtype,
-                        copy=False,
-                    ),
-                    self._dtype(
-                        1.0e-30
-                    ),
-                )
-            )
-
-            if cylinder_shell_gamma is not None:
-                A_ij = (
-                    A_ij
-                    * np.asarray(
-                        cylinder_shell_gamma,
-                        dtype=self._dtype,
-                    )
-                )
-
-            g_by_pair = np.zeros(
-                (
-                    self._n_pairs,
-                    r32.size,
-                ),
-                dtype=self._dtype,
-            )
-
-            if get_num_threads is None:
-                accumulate_gaussians_by_pair(
-                    r32,
-                    r_ij,
-                    sigma,
-                    A_ij,
-                    self._pair_offsets,
-                    g_by_pair,
-                )
-
-            else:
-                nblk = max(
-                    1,
-                    int(
-                        get_num_threads()
-                    ),
-                )
-
-                partial = np.zeros(
-                    (
-                        nblk,
-                        self._n_pairs,
-                        r32.size,
-                    ),
-                    dtype=self._dtype,
-                )
-
-                accumulate_gaussians_by_shell_blocks(
-                    r32,
-                    r_ij,
-                    sigma,
-                    A_ij,
-                    self._shell_pair_id,
-                    partial,
-                )
-
-                g_by_pair[:] = partial.sum(
-                    axis=0
-                )
-
-            _mark(
-                "gaussian_accumulation"
-            )
-            
+        _mark("gaussian_accumulation")
         # --- Weighted total g(r) (single dot-product over ordered pairs) ---
         g_weighted = (
             self._w_ordered.astype(self._dtype)[:, None]

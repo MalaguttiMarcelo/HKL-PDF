@@ -22,16 +22,16 @@ ftol = 0.001
 xtol = 0.001
 gtol = 0.001
 progress_every_sec = 0.5
-saxs_enabled = true
+saxs_enabled = false
 saxs_model = same_as_size_model
 saxs_apply_qdamp = false
 saxs_apply_qmax = false
 
 [initial_values]
-scale = 0.050048571716577554
-a = 3.8905556870149756
-b = 3.8905556870149756
-c = 3.8905556870149756
+scale = 0.05001362553532311
+a = 3.8905412375131556
+b = 3.8905412375131556
+c = 3.8905412375131556
 alpha = 90.0
 beta = 90.0
 gamma = 90.0
@@ -44,12 +44,6 @@ qdamp = 0.0
 delta_broad = 0.0
 qmax = 40.0
 qmax_zeros = 5.0
-saxs_scale = 1.0
-saxs_diameter = 0.0
-saxs_diameter_std = 0.0
-saxs_height = 0.0
-saxs_height_std = 0.0
-delta_g = 0.0
 occ_c = 1.0
 occ_ca = 1.0
 occ_o = 1.0
@@ -62,6 +56,12 @@ y_o = 0.0
 z_c = 0.25
 z_ca = 0.0
 z_o = 0.25
+cyl_diameter = 190.28360664854875
+cyl_thickness = 125.22663333430911
+cyl_thickness_std = 0.0
+cyl_axis_h = 0.0
+cyl_axis_k = 0.0
+cyl_axis_l = 1.0
 
 [refinable_parameters]
 scale = true
@@ -80,33 +80,34 @@ qdamp = false
 delta_broad = false
 qmax = false
 qmax_zeros = false
-saxs_scale = false
-saxs_diameter = false
-saxs_diameter_std = false
-saxs_height = false
-saxs_height_std = false
-delta_g = false
 delta1_c-ca = false
 delta1_c-o = false
-delta1_o-o = false
-occ_c = false
-occ_ca = false
-occ_o = false
-x_c = false
-x_ca = false
-x_o = false
-y_c = false
-y_ca = false
-y_o = false
-z_c = false
-z_ca = false
-z_o = false
+occ_c = False
+occ_ca = False
+occ_o = False
+x_c = False
+x_ca = False
+x_o = False
+y_c = False
+y_ca = False
+y_o = False
+z_c = False
+z_ca = False
+z_o = False
+cyl_diameter = true
+cyl_thickness = true
+cyl_thickness_std = false
+cyl_axis_h = false
+cyl_axis_k = false
+cyl_axis_l = false
 
 [bounds]
-biso_Pd = 0, 10
+biso_Pd = 0.0, 10.0
+cyl_thickness = 0.0, 
+cyl_diameter = 0.0, 
 
 [constraints]
 
 [crystallite_shape]
-mode = finite_shape
+mode = conventional
 

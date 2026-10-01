@@ -1,0 +1,138 @@
+{
+  "format": "hkl-pdf-structure-view",
+  "version": 1,
+  "saved_at": "2026-09-25T12:59:14",
+  "structure_path": "Z:\\Softwares\\pdf_fitting_project\\examples\\2-Calcite-ball-milled\\Calcite.cif",
+  "input_path": "Z:/Softwares/pdf_fitting_project/examples/2-Calcite-ball-milled/Calcite_150min.inp",
+  "element_styles": {
+    "Ca": {
+      "radius": 0.58,
+      "color": "#62C554",
+      "visible": false,
+      "show_label": false,
+      "opacity": 1.0
+    },
+    "C": {
+      "radius": 0.38,
+      "color": "#303030",
+      "visible": false,
+      "show_label": false,
+      "opacity": 1.0
+    },
+    "O": {
+      "color": "#E53935",
+      "radius": 0.36,
+      "visible": true,
+      "show_label": false,
+      "opacity": 1.0
+    }
+  },
+  "site_styles": {
+    "0": {},
+    "1": {},
+    "2": {},
+    "3": {},
+    "4": {},
+    "5": {},
+    "6": {
+      "radius": 0.38,
+      "color": "#303030",
+      "visible": true,
+      "show_label": false,
+      "opacity": 1.0
+    },
+    "7": {},
+    "8": {},
+    "9": {},
+    "10": {},
+    "11": {},
+    "12": {},
+    "13": {},
+    "14": {},
+    "15": {},
+    "16": {},
+    "17": {},
+    "18": {},
+    "19": {},
+    "20": {},
+    "21": {},
+    "22": {},
+    "23": {},
+    "24": {},
+    "25": {},
+    "26": {},
+    "27": {},
+    "28": {},
+    "29": {}
+  },
+  "display": {
+    "show_atoms": true,
+    "show_cell": true,
+    "show_lattice_vectors": true,
+    "show_labels": true,
+    "orthographic": false,
+    "atom_scale": 0.49,
+    "background": [
+      0.9568627450980393,
+      0.9568627450980393,
+      0.9568627450980393
+    ]
+  },
+  "supercell": {
+    "repeat_a": 1,
+    "repeat_b": 1,
+    "repeat_c": 1,
+    "boundary_images": false
+  },
+  "bonds": {
+    "enabled": true,
+    "two_color": true,
+    "tolerance_scale": 1.15,
+    "minimum_distance": 0.1,
+    "maximum_distance": null,
+    "radius": 0.08,
+    "opacity": 0.05
+  },
+  "polyhedra": {
+    "requested": false,
+    "visible": false,
+    "central_element": "C",
+    "neighbor_element": "*",
+    "display_mode": "selected",
+    "face_color": "#4A90E2",
+    "edge_color": "#1F4F8A",
+    "opacity": 0.35,
+    "edge_width": 2.0
+  },
+  "camera": {
+    "camera_position": [
+      [
+        8.02342741335996,
+        9.779696389203673,
+        5.167462972688355
+      ],
+      [
+        1.4074592239195531,
+        1.4074592239195531,
+        1.4068530446821874
+      ],
+      [
+        -0.1912482100437535,
+        -0.27243304590433065,
+        0.9429763293181592
+      ]
+    ],
+    "parallel_projection": false
+  },
+  "window": {
+    "splitter_sizes": [
+      455,
+      1029
+    ],
+    "tab_index": 1,
+    "size": [
+      1500,
+      920
+    ]
+  }
+}

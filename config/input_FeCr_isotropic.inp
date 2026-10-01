@@ -28,16 +28,16 @@ gtol = 0.001
 progress_every_sec = 0.5
 
 [initial_values]
-scale = 0.2692271125382103
+scale = 0.2500986518331641
 qdamp = 0.011485099495637478
 delta_broad = 0.0014090180673610453
 qmax = 20.0
 qmax_zeros = 5.0
-d = 120.0
-d_std = 40.0
-a = 2.8683280873827335
-b = 2.8683280873827335
-c = 2.8683280873827335
+d = 84.21033439198368
+d_std = 69.33152658229807
+a = 2.8683573541584586
+b = 2.8683573541584586
+c = 2.8683573541584586
 alpha = 90.0
 beta = 90.0
 gamma = 90.0
@@ -45,9 +45,9 @@ x_fe1 = 0.0
 y_fe1 = 0.0
 z_fe1 = 0.0
 occ_fe1 = 1.0
-biso_fe1 = 0.5936945933041273
-delta_g = 0.006246242914985814
-delta1 = 1.7272980153571729
+biso_fe1 = 0.49416499422968185
+delta_g = 0.006925719909960188
+delta1 = 1.627762427389428
 
 [refinable_parameters]
 scale = True
@@ -61,8 +61,8 @@ qdamp = False
 delta_broad = False
 qmax = False
 qmax_zeros = False
-d = False
-d_std = False
+d = True
+d_std = True
 x_fe1 = False
 y_fe1 = False
 z_fe1 = False
@@ -74,8 +74,8 @@ delta1 = True
 [bounds]
 biso_fe1 = 0.0, 10.0
 d = 0.0,
-delta1 = 0,
-d_std = 0,
+delta1 = 0.0,
+d_std = 0.0,
 
 [constraints]
 

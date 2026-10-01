@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
+import pandas as pd
 from collections import defaultdict
+from joblib import Parallel, delayed
+import multiprocessing
 from math import gcd, ceil, log, sqrt, pi
 from functools import lru_cache
 from dataclasses import dataclass
@@ -542,10 +545,6 @@ def reduce_hkl(h, k, l):
 
 
 def generate_bcc_shells_with_hkl(max_radius=5.0, a=2.86, bin_width=1e-5):
-    import multiprocessing
-    import pandas as pd
-    from joblib import Parallel, delayed
-
     shifts = [np.array([0.0, 0.0, 0.0]), np.array([0.5, 0.5, 0.5])]
     max_n = ceil(max_radius / a) + 1
     num_cores = min(multiprocessing.cpu_count(), 20)

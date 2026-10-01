@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 import tempfile
 import itertools
 from typing import Optional, Dict, Any, List, Tuple
@@ -11,27 +10,17 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
-
+from pymatgen.core.structure import Structure
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 from pdf_fitting.io_handler import read_input_file
+from pdf_fitting.models.microstrain_utils import Cell as CFCell, required_terms_for_sg
 
 from .defaults import DEFAULT_PARAMS
 from .param_widgets import ParamTableWidget, DynParamTableWidget, LambdaListWidget, SiteParamTableWidget
+from .cif_utils import read_cif_asu_sites, clean_el_symbol
 
-def clean_el_symbol(name: Any) -> str:
-    s = str(name).strip()
-
-    match = re.match(r"([A-Za-z]{1,2})", s)
-
-    if not match:
-        return s
-
-    symbol = match.group(1)
-
-    if len(symbol) == 1:
-        return symbol.upper()
-
-    return symbol[0].upper() + symbol[1:].lower()
+from .crystallite_shape_dialog import CrystalliteShapeDialog
 
 def lambda_safe_species_label(name: str) -> str:
     """
@@ -67,15 +56,10 @@ class InputBuilder(QtWidgets.QWidget):
         super().__init__(parent)
         self._block = False
         self._sym_enabled: Optional[set[str]] = None
-        self._structure_crystal_system: str = ""
         self._biso_label_overrides: Dict[str, str] = {}
         self._dyn_biso_keys: set[str] = set()
         self._dyn_use_flags: Dict[str, bool] = {}
         self._last_structure_path: str = ""
-        self._loaded_structure = None
-        self._loaded_structure_path = ""
-        self._loaded_structure_mtime = None
-
         self._site_table_max_rows = int(
             os.environ.get(
                 "PDF_FITTING_SITE_TABLE_MAX_ROWS",
@@ -96,9 +80,6 @@ class InputBuilder(QtWidgets.QWidget):
         self._site_biso_keys: set[str] = set()
         self._site_use_flags: Dict[str, bool] = {}
         self._crystallite_shape_spec: Dict[str, Any] = {}
-        self._loaded_cf_initial: Dict[str, Any] = {}
-        self._loaded_cf_refinable: Dict[str, bool] = {}
-        self._loaded_cf_bounds: Dict[str, Any] = {}
 
         # (Optional) host if you ever want to dock a plot. Not required for layout.
         self._rwp_widget: Optional[QtWidgets.QWidget] = None
@@ -237,156 +218,21 @@ class InputBuilder(QtWidgets.QWidget):
         self.spin_max_nfev = QtWidgets.QSpinBox()
         self.spin_max_nfev.setRange(1, 100000)
         self.spin_max_nfev.setValue(60)
-        self.spin_max_nfev.setToolTip(
-            "Maximum number of optimizer iterations.\n\n"
-            "The refinement stops when this limit is reached, unless a "
-            "convergence tolerance stops it earlier.\n\n"
-            "Increase this value if refinement stops before the fit converges."
-        )
 
         self.spin_ftol = QtWidgets.QDoubleSpinBox()
         self.spin_xtol = QtWidgets.QDoubleSpinBox()
         self.spin_gtol = QtWidgets.QDoubleSpinBox()
-
         for sp in (self.spin_ftol, self.spin_xtol, self.spin_gtol):
             sp.setDecimals(8)
             sp.setRange(1e-12, 1.0)
             sp.setSingleStep(1e-4)
             sp.setValue(1e-3)
 
-        self.spin_ftol.setToolTip(
-            "Fit-cost tolerance (ftol).\n\n"
-            "The refinement stops when the relative improvement in the "
-            "fit cost (sum of squared residuals) becomes smaller than "
-            "this value.\n\n"
-            "Smaller value means stricter convergence and usually more iterations."
-        )
-
-        self.spin_xtol.setToolTip(
-            "Parameter-step tolerance (xtol).\n\n"
-            "The refinement stops when changes in the refined parameters "
-            "become smaller than this value.\n\n"
-            "Smaller value means stricter convergence and usually more iterations."
-        )
-
-        self.spin_gtol.setToolTip(
-            "Gradient tolerance (gtol).\n\n"
-            "The refinement stops when the gradient or optimality measure "
-            "is sufficiently close to zero, indicating a stationary minimum.\n\n"
-            "Smaller value means stricter convergence and usually more iterations."
-        )
-
         self.spin_progress = QtWidgets.QDoubleSpinBox()
         self.spin_progress.setDecimals(2)
         self.spin_progress.setRange(0.05, 10.0)
         self.spin_progress.setSingleStep(0.1)
         self.spin_progress.setValue(0.5)
-        self.spin_progress.setToolTip(
-            "Time interval in seconds between progress updates sent to the GUI.\n\n"
-            "Smaller values make plots and status updates more responsive, "
-            "but can slightly slow large refinements."
-        )
-
-        # ---------------------------------------------------------
-        # Numerical CPU/GPU backend options
-        # ---------------------------------------------------------
-        self.combo_shell_backend = QtWidgets.QComboBox()
-
-        self.combo_shell_backend.addItem(
-            "CPU / Numba",
-            "cpu",
-        )
-
-        self.combo_shell_backend.addItem(
-            "CUDA / CuPy",
-            "cuda",
-        )
-
-        self.combo_shell_backend.addItem(
-            "Automatic",
-            "auto",
-        )
-
-        self.combo_shell_backend.setCurrentIndex(
-            0
-        )
-
-        self.combo_shell_backend.setToolTip(
-            "Backend used when generating and grouping a new shell cache.\n\n"
-            "CPU / Numba: use the established CPU implementation.\n"
-            "CUDA / CuPy: require a compatible NVIDIA CUDA device.\n"
-            "Automatic: use CUDA when available and otherwise use CPU.\n\n"
-            "This setting only affects shell generation on a cache miss."
-        )
-
-        self.combo_pdf_backend = QtWidgets.QComboBox()
-
-        self.combo_pdf_backend.addItem(
-            "CPU / Numba",
-            "cpu",
-        )
-
-        self.combo_pdf_backend.addItem(
-            "CUDA / CuPy",
-            "cuda",
-        )
-
-        self.combo_pdf_backend.addItem(
-            "Automatic",
-            "auto",
-        )
-
-        self.combo_pdf_backend.setCurrentIndex(
-            0
-        )
-
-        self.combo_pdf_backend.setToolTip(
-            "Backend used for repeated PDF Gaussian accumulation.\n\n"
-            "CPU / Numba: use the established parallel CPU implementation.\n"
-            "CUDA / CuPy: use the NVIDIA GPU implementation.\n"
-            "Automatic: use CUDA when available and otherwise use CPU."
-        )
-
-        self.spin_gpu_device = QtWidgets.QSpinBox()
-
-        self.spin_gpu_device.setRange(
-            0,
-            31,
-        )
-
-        self.spin_gpu_device.setValue(
-            0
-        )
-
-        self.spin_gpu_device.setToolTip(
-            "CUDA device number. Use 0 when the computer has one NVIDIA GPU."
-        )
-
-        self.spin_gpu_memory_fraction = QtWidgets.QDoubleSpinBox()
-
-        self.spin_gpu_memory_fraction.setDecimals(
-            2
-        )
-
-        self.spin_gpu_memory_fraction.setRange(
-            0.10,
-            0.95,
-        )
-
-        self.spin_gpu_memory_fraction.setSingleStep(
-            0.05
-        )
-
-        self.spin_gpu_memory_fraction.setValue(
-            0.70
-        )
-
-        self.spin_gpu_memory_fraction.setToolTip(
-            "Maximum fraction of currently available GPU memory that shell "
-            "grouping is allowed to use.\n\n"
-            "0.70 is recommended so Windows, PyVista, and CUDA temporary "
-            "sorting arrays retain enough free GPU memory."
-        )
 
         ref_form = QtWidgets.QFormLayout()
         ref_form.addRow(self.chk_staged)
@@ -396,48 +242,12 @@ class InputBuilder(QtWidgets.QWidget):
         ref_form.addRow(self.chk_compute_local_trends)
         ref_form.addRow(self.chk_export_finite_coordination)
 
-        lbl_max_iterations = QtWidgets.QLabel("Maximum number of iterations:")
-        lbl_max_iterations.setToolTip(self.spin_max_nfev.toolTip())
-
-        lbl_ftol = QtWidgets.QLabel("Fit-cost tolerance (ftol):")
-        lbl_ftol.setToolTip(self.spin_ftol.toolTip())
-
-        lbl_xtol = QtWidgets.QLabel("Parameter-step tolerance (xtol):")
-        lbl_xtol.setToolTip(self.spin_xtol.toolTip())
-
-        lbl_gtol = QtWidgets.QLabel("Gradient tolerance (gtol):")
-        lbl_gtol.setToolTip(self.spin_gtol.toolTip())
-
-        lbl_progress = QtWidgets.QLabel("Report progress time step (s):")
-        lbl_progress.setToolTip(self.spin_progress.toolTip())
-
-        ref_form.addRow("Final refinement r step (Å):", self.spin_rstep_final)
-        ref_form.addRow(lbl_max_iterations, self.spin_max_nfev)
-        ref_form.addRow(lbl_ftol, self.spin_ftol)
-        ref_form.addRow(lbl_xtol, self.spin_xtol)
-        ref_form.addRow(lbl_gtol, self.spin_gtol)
-        ref_form.addRow(lbl_progress, self.spin_progress)
-
-        ref_form.addRow(
-            "Shell-generation backend:",
-            self.combo_shell_backend,
-        )
-
-        ref_form.addRow(
-            "PDF calculation backend:",
-            self.combo_pdf_backend,
-        )
-
-        ref_form.addRow(
-            "CUDA device:",
-            self.spin_gpu_device,
-        )
-
-        ref_form.addRow(
-            "GPU memory fraction:",
-            self.spin_gpu_memory_fraction,
-        )
-
+        ref_form.addRow("refinement_r_step_final (Å):", self.spin_rstep_final)
+        ref_form.addRow("max_nfev_final:", self.spin_max_nfev)
+        ref_form.addRow("ftol:", self.spin_ftol)
+        ref_form.addRow("xtol:", self.spin_xtol)
+        ref_form.addRow("gtol:", self.spin_gtol)
+        ref_form.addRow("progress_every_sec:", self.spin_progress)
 
         self.gb_refineinfo = QtWidgets.QGroupBox("Refinement information")
         self.gb_refineinfo.setLayout(ref_form)
@@ -902,50 +712,17 @@ class InputBuilder(QtWidgets.QWidget):
         self.main_tabs = QtWidgets.QTabWidget()
         self.main_tabs.setDocumentMode(True)
 
-        # ---------------------------------------------------------
-        # Input & refinement page
-        #
-        # Keep the contents inside a vertical scroll area so that
-        # Refinement information remains usable on low-resolution
-        # displays or when the application window is short.
-        # ---------------------------------------------------------
         w_input = QtWidgets.QWidget()
-
         v_input = QtWidgets.QVBoxLayout(w_input)
-        v_input.setContentsMargins(6, 6, 6, 6)
-        v_input.setSpacing(6)
-
+        v_input.setContentsMargins(0, 0, 0, 0)
         v_input.addWidget(gb_files)
         v_input.addWidget(gb_range)
         v_input.addWidget(self.gb_refineinfo)
         v_input.addStretch(1)
 
-        self.scroll_input = QtWidgets.QScrollArea()
-        self.scroll_input.setWidgetResizable(True)
-        self.scroll_input.setWidget(w_input)
-
-        # Only show the vertical scrollbar when needed.
-        self.scroll_input.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-
-        # Avoid an unnecessary horizontal scrollbar.
-        self.scroll_input.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff
-        )
-
-        self.scroll_input.setFrameShape(
-            QtWidgets.QFrame.NoFrame
-        )
-
-        # ---------------------------------------------------------
-        # Parameters page
-        # ---------------------------------------------------------
         w_params = QtWidgets.QWidget()
-
         v_params = QtWidgets.QVBoxLayout(w_params)
         v_params.setContentsMargins(0, 0, 0, 0)
-
         v_params.addWidget(self.toolbox, 1)
 
 
@@ -999,7 +776,7 @@ class InputBuilder(QtWidgets.QWidget):
 
         v_constraints.addWidget(gb_constraints, 1)
 
-        self.main_tabs.addTab(self.scroll_input, "Input & refinement")
+        self.main_tabs.addTab(w_input, "Input & refinement")
         self.main_tabs.addTab(w_params, "Parameters")
         self.main_tabs.addTab(w_constraints, "Constraints")
 
@@ -1027,34 +804,11 @@ class InputBuilder(QtWidgets.QWidget):
             self.spin_xtol,
             self.spin_gtol,
             self.spin_progress,
-            self.spin_gpu_device,
-            self.spin_gpu_memory_fraction,
         ):
-            if isinstance(
-                w,
-                QtWidgets.QAbstractButton,
-            ):
-                w.toggled.connect(
-                    lambda _=None:
-                    self._emit_changed_if_not_blocked()
-                )
+            if isinstance(w, QtWidgets.QAbstractButton):
+                w.toggled.connect(lambda _=None: self._emit_changed_if_not_blocked())
             else:
-                w.valueChanged.connect(
-                    lambda _=None:
-                    self._emit_changed_if_not_blocked()
-                )
-
-        self.combo_shell_backend.currentIndexChanged.connect(
-            lambda _=None:
-            self._on_gpu_backend_changed()
-        )
-
-        self.combo_pdf_backend.currentIndexChanged.connect(
-            lambda _=None:
-            self._on_gpu_backend_changed()
-        )
-
-        self._update_gpu_controls_enabled()
+                w.valueChanged.connect(lambda _=None: self._emit_changed_if_not_blocked())
 
         self.tbl_struct.changed.connect(self._emit_changed_if_not_blocked)
         self.tbl_instr.changed.connect(self._emit_changed_if_not_blocked)
@@ -1081,47 +835,7 @@ class InputBuilder(QtWidgets.QWidget):
 
         self._seed_defaults()
 
-    def _update_gpu_controls_enabled(self) -> None:
-        """
-        Enable CUDA device and memory controls only when CUDA may be used.
-        """
-        shell_backend = str(
-            self.combo_shell_backend.currentData()
-            or "cpu"
-        )
 
-        pdf_backend = str(
-            self.combo_pdf_backend.currentData()
-            or "cpu"
-        )
-
-        cuda_possible = (
-            shell_backend in (
-                "cuda",
-                "auto",
-            )
-            or pdf_backend in (
-                "cuda",
-                "auto",
-            )
-        )
-
-        self.spin_gpu_device.setEnabled(
-            cuda_possible
-        )
-
-        # gpu_memory_fraction is currently used by shell grouping.
-        self.spin_gpu_memory_fraction.setEnabled(
-            shell_backend in (
-                "cuda",
-                "auto",
-            )
-        )
-
-    def _on_gpu_backend_changed(self) -> None:
-        self._update_gpu_controls_enabled()
-        self._emit_changed_if_not_blocked()
-        
     def _on_size_model_changed(self, idx: int) -> None:
         """
         Switch between spherical, cylinder/disk, and finite shape models.
@@ -1204,10 +918,9 @@ class InputBuilder(QtWidgets.QWidget):
 
     def _current_structure_for_shape_dialog(self):
         """
-        Read the current structure only when the crystallite-shape dialog is opened.
+        Read current structure for crystallite-shape preview.
 
-        Heavy pymatgen and CIF imports are intentionally local so they do not slow
-        down normal GUI startup.
+        This is only for visualization, not refinement.
         """
         path = str(self.le_structure.text() or "").strip()
 
@@ -1216,39 +929,21 @@ class InputBuilder(QtWidgets.QWidget):
 
         try:
             if path.lower().endswith(".cif"):
-                from .cif_utils import read_cif_asu_sites
-
-                structure, _asu = read_cif_asu_sites(path)
-                return structure
-
-            from pymatgen.core.structure import Structure
-
+                s, _asu = read_cif_asu_sites(path)
+                return s
             return Structure.from_file(path)
-
         except Exception:
             return None
 
 
     def open_crystallite_shape_dialog(self) -> None:
-        """
-        Open the crystallite-shape dialog.
-
-        The dialog and its PyVista/VTK viewer are imported only when the user
-        actually presses the Build crystallite shape button.
-        """
-        from .crystallite_shape_dialog import CrystalliteShapeDialog
-
         structure = self._current_structure_for_shape_dialog()
 
         dlg = CrystalliteShapeDialog(
             self,
-            initial_spec=getattr(
-                self,
-                "_crystallite_shape_spec",
-                {},
-            ) or {},
+            initial_spec=getattr(self, "_crystallite_shape_spec", {}) or {},
             lattice_params=self._current_lattice_params_for_shape_dialog(),
-            structure=structure,
+            structure=structure,  # NEW
         )
 
         def accept_shape(spec: dict):
@@ -1257,37 +952,29 @@ class InputBuilder(QtWidgets.QWidget):
 
             self._crystallite_shape_spec = spec
 
+            # Important: force GUI into finite-shape mode.
             try:
                 self.gb_size.setChecked(True)
             except Exception:
                 pass
-
+            
             try:
                 self.combo_size_model.setCurrentIndex(2)
             except Exception:
                 pass
-
+            
             self._update_shape_summary_label()
             self._emit_changed_if_not_blocked()
-
+            
         dlg.shapeAccepted.connect(accept_shape)
 
-        QtCore.QTimer.singleShot(
-            0,
-            dlg.showMaximized,
-        )
-
+        QtCore.QTimer.singleShot(0, dlg.showMaximized)
         dlg.exec()
 
         try:
-            main_window = self.window()
-
-            if hasattr(
-                main_window,
-                "_update_run_button_modes",
-            ):
-                main_window._update_run_button_modes()
-
+            mw = self.window()
+            if hasattr(mw, "_update_run_button_modes"):
+                mw._update_run_button_modes()
         except Exception:
             pass
 
@@ -1320,16 +1007,10 @@ class InputBuilder(QtWidgets.QWidget):
         bounds_seed = bounds_seed or {}
 
         is_cubic_terms = (
-            str(
-                getattr(
-                    self,
-                    "_structure_crystal_system",
-                    "",
-                )
-                or ""
-            ).strip().lower()
-            == "cubic"
+            len(self._cf_terms) == 2
+            and [str(t).upper() for t in self._cf_terms] == ["E1", "E2"]
         )
+
         # -------------------------
         # Invariant Edge/Screw tables
         # -------------------------
@@ -1360,124 +1041,15 @@ class InputBuilder(QtWidgets.QWidget):
 
             # Preserve existing values if the user already edited them.
             old_ini, old_ref, old_bnd = self.tbl_cf_ab.extract()
-            loaded_ini_lc = {
-                str(key).strip().lower(): value
-                for key, value in (
-                    getattr(
-                        self,
-                        "_loaded_cf_initial",
-                        {},
-                    )
-                    or {}
-                ).items()
-            }
 
-            loaded_ref_lc = {
-                str(key).strip().lower(): bool(value)
-                for key, value in (
-                    getattr(
-                        self,
-                        "_loaded_cf_refinable",
-                        {},
-                    )
-                    or {}
-                ).items()
-            }
+            def _old_val(new_key: str, old_key: str, default: float):
+                return old_ini.get(new_key, old_ini.get(old_key, default))
 
-            loaded_bnd_lc = {
-                str(key).strip().lower(): value
-                for key, value in (
-                    getattr(
-                        self,
-                        "_loaded_cf_bounds",
-                        {},
-                    )
-                    or {}
-                ).items()
-            }
+            def _old_ref(new_key: str, old_key: str, default: bool = False):
+                return bool(old_ref.get(new_key, old_ref.get(old_key, default)))
 
-            def _old_val(
-                new_key: str,
-                old_key: str,
-                default: float,
-            ):
-                new_key_lower = new_key.lower()
-                old_key_lower = old_key.lower()
-
-                if new_key_lower in loaded_ini_lc:
-                    return loaded_ini_lc[
-                        new_key_lower
-                    ]
-
-                if old_key_lower in loaded_ini_lc:
-                    return loaded_ini_lc[
-                        old_key_lower
-                    ]
-
-                return old_ini.get(
-                    new_key,
-                    old_ini.get(
-                        old_key,
-                        default,
-                    ),
-                )
-
-            def _old_ref(
-                new_key: str,
-                old_key: str,
-                default: bool = False,
-            ):
-                new_key_lower = new_key.lower()
-                old_key_lower = old_key.lower()
-
-                if new_key_lower in loaded_ref_lc:
-                    return bool(
-                        loaded_ref_lc[
-                            new_key_lower
-                        ]
-                    )
-
-                if old_key_lower in loaded_ref_lc:
-                    return bool(
-                        loaded_ref_lc[
-                            old_key_lower
-                        ]
-                    )
-
-                return bool(
-                    old_ref.get(
-                        new_key,
-                        old_ref.get(
-                            old_key,
-                            default,
-                        ),
-                    )
-                )
-
-            def _old_bnd(
-                new_key: str,
-                old_key: str,
-            ):
-                new_key_lower = new_key.lower()
-                old_key_lower = old_key.lower()
-
-                if new_key_lower in loaded_bnd_lc:
-                    return loaded_bnd_lc[
-                        new_key_lower
-                    ]
-
-                if old_key_lower in loaded_bnd_lc:
-                    return loaded_bnd_lc[
-                        old_key_lower
-                    ]
-
-                return old_bnd.get(
-                    new_key,
-                    old_bnd.get(
-                        old_key,
-                        ("", ""),
-                    ),
-                )
+            def _old_bnd(new_key: str, old_key: str):
+                return old_bnd.get(new_key, old_bnd.get(old_key, ("", "")))
 
             ab_seed = {
                 "CEdgeA": _old_val("CEdgeA", "cedgea", 0.265280),
@@ -2070,7 +1642,7 @@ class InputBuilder(QtWidgets.QWidget):
     # -------------------------
     # (3) push lattice params from CIF
     # -------------------------
-    def _set_struct_from_structure(self, s: Any) -> None:
+    def _set_struct_from_structure(self, s: Structure) -> None:
         """
         Push lattice parameters from structure into the GUI tables, while preserving
         current GUI parameter values/refine flags/bounds.
@@ -2252,13 +1824,6 @@ class InputBuilder(QtWidgets.QWidget):
 
 
     def _on_micro_model_changed(self) -> None:
-        """
-        Update the visible microstrain panel.
-
-        While an input file is being loaded, only update widget visibility and
-        checked states. Do not rebuild parameter tables until set_from_config()
-        explicitly supplies the complete loaded parameter dictionaries.
-        """
         idx = self.combo_micro_model.currentIndex()
 
         use_iso = idx == 0
@@ -2270,55 +1835,26 @@ class InputBuilder(QtWidgets.QWidget):
                 self.micro_right_stack.setCurrentIndex(0)
             elif use_wilkens:
                 self.micro_right_stack.setCurrentIndex(1)
-            else:
+            elif use_pah:
                 self.micro_right_stack.setCurrentIndex(2)
         except Exception:
             pass
 
+        self.gb_strain.setChecked(bool(use_iso))
+        self.gb_wilkens.setChecked(bool(use_wilkens))
+        self.gb_pah.setChecked(bool(use_pah))
+
+        # Contrast factors are meaningful for Wilkens and PAH.
         try:
-            self.gb_strain.blockSignals(True)
-            self.gb_wilkens.blockSignals(True)
-            self.gb_pah.blockSignals(True)
-
-            self.gb_strain.setChecked(use_iso)
-            self.gb_wilkens.setChecked(use_wilkens)
-            self.gb_pah.setChecked(use_pah)
-
-        finally:
-            try:
-                self.gb_strain.blockSignals(False)
-                self.gb_wilkens.blockSignals(False)
-                self.gb_pah.blockSignals(False)
-            except Exception:
-                pass
-
-        try:
-            self.chk_cf.setVisible(use_wilkens or use_pah)
-
+            self.chk_cf.setVisible(bool(use_wilkens or use_pah))
             if not (use_wilkens or use_pah):
-                self.chk_cf.blockSignals(True)
                 self.chk_cf.setChecked(False)
-                self.chk_cf.blockSignals(False)
-
-            show_cf = (
-                (use_wilkens or use_pah)
-                and self.chk_cf.isChecked()
-            )
-
-            self.gb_cf.setVisible(show_cf)
-            self.gb_cf.setEnabled(show_cf)
-            self._tabs_cf.setEnabled(show_cf)
-
+            self._on_cf_visibility_changed(self.chk_cf.isChecked())
         except Exception:
             pass
 
-        if self._block:
-            return
-
         self._apply_params_to_tables_from_current()
         self._emit_changed_if_not_blocked()
-
-        
     def _on_structure_path_changed(self) -> None:
         if self._block:
             return
@@ -2326,438 +1862,149 @@ class InputBuilder(QtWidgets.QWidget):
         self._update_symmetry_from_structure(path)
         self._emit_changed_if_not_blocked()
 
-    def _contrast_terms_from_loaded_parameters(
-        self,
-    ) -> List[str]:
-        """
-        Determine invariant terms from contrast-factor parameter names already
-        loaded from the input file.
-
-        Examples:
-            EdgeE1, EdgeE2, ScrewE1 -> E1, E2
-            Edge_E1, Screw_E4       -> E1, E4
-        """
-        parameter_names = set()
-
-        for source in (
-            getattr(
-                self,
-                "_loaded_cf_initial",
-                {},
-            )
-            or {},
-            getattr(
-                self,
-                "_loaded_cf_refinable",
-                {},
-            )
-            or {},
-            getattr(
-                self,
-                "_loaded_cf_bounds",
-                {},
-            )
-            or {},
-        ):
-            parameter_names.update(
-                str(name).strip()
-                for name in source.keys()
-            )
-
-        term_numbers = set()
-
-        for parameter_name in parameter_names:
-            match = re.match(
-                r"(?i)^(?:edge|screw)[_ ]*e(\d+)$",
-                parameter_name,
-            )
-
-            if match is None:
-                continue
-
-            try:
-                term_number = int(
-                    match.group(1)
-                )
-            except Exception:
-                continue
-
-            if term_number > 0:
-                term_numbers.add(
-                    term_number
-                )
-
-        return [
-            f"E{term_number}"
-            for term_number in sorted(
-                term_numbers
-            )
-        ]
-
-    
-    def _update_symmetry_from_structure(
-        self,
-        path: str,
-    ) -> None:
-        """
-        Load only lightweight CIF metadata for the Builder.
-
-        Full pymatgen parsing and symmetry analysis are deliberately deferred
-        until Calculate, Run, the Structure viewer, or the crystallite-shape
-        dialog actually needs a complete Structure object.
-        """
+    def _update_symmetry_from_structure(self, path: str) -> None:
         self._sym_enabled = None
         self._biso_label_overrides = {}
-
-        path = str(
-            path
-            or ""
-        ).strip()
-
-        structure_changed = (
-            path
-            != str(
-                self._last_structure_path
-                or ""
-            ).strip()
-        )
-
-        if (
-            not path
-            or not os.path.exists(path)
-        ):
+        # If the structure file changed, do NOT carry over old per-site Biso values.
+        structure_changed = (str(path or "").strip() != str(self._last_structure_path or "").strip())
+        if not path or not os.path.exists(path):
             self._apply_params_to_tables_from_current()
             return
 
-        from .structure_metadata import read_structure_metadata
-
-        metadata_start = time.perf_counter()
-
+        # Read structure; for CIF also extract asymmetric-unit sites for Biso labels.
+        asu_sites: List[Dict[str, Any]] = []
         try:
-            metadata = read_structure_metadata(
-                path
-            )
-        except Exception as exc:
-            print(
-                "[BUILDER] Lightweight structure metadata "
-                f"could not be read: {exc}"
-            )
-
-            self._last_structure_path = path
-            self._loaded_structure = None
-
-            try:
-                self._loaded_structure_path = os.path.abspath(
-                    path
-                )
-            except Exception:
-                self._loaded_structure_path = path
-
+            if str(path).lower().endswith(".cif"):
+                s, asu_sites = read_cif_asu_sites(path)
+                if s is None:
+                    raise RuntimeError("failed to read CIF")
+            else:
+                s = Structure.from_file(path)
+        except Exception:
+            self._apply_params_to_tables_from_current()
             return
 
-        print(
-            "[BUILDER TIMING] Lightweight structure metadata: "
-            f"{time.perf_counter() - metadata_start:.3f} s "
-            f"(cache_hit={metadata.get('cache_hit', False)})"
-        )
-
-        lattice_values = (
-            metadata.get(
-                "lattice",
-                {},
-            )
-            or {}
-        )
-
-        crystal_system = str(
-            metadata.get(
-                "crystal_system",
-                "",
-            )
-            or ""
-        ).strip().lower()
-        self._structure_crystal_system = (
-            crystal_system
-        )
-
-        metadata_terms = [
-            str(term).upper()
-            for term in (
-                metadata.get(
-                    "contrast_terms",
-                    [],
-                )
-                or []
-            )
-        ]
-
-        input_terms = (
-            self._contrast_terms_from_loaded_parameters()
-        )
-
-        if metadata_terms:
-            terms = list(
-                metadata_terms
-            )
-
-            for term in input_terms:
-                if term not in terms:
-                    terms.append(
-                        term
-                    )
-        else:
-            terms = list(
-                input_terms
-            )
-
-        terms = sorted(
-            set(terms),
-            key=lambda term: (
-                int(term[1:])
-                if (
-                    len(term) > 1
-                    and term[1:].isdigit()
-                )
-                else 999
-            ),
-        )
-
-        if input_terms and not metadata_terms:
-            print(
-                "[BUILDER] CIF metadata did not provide contrast-factor "
-                "terms. Using terms found in the input file: "
-                f"{terms}"
-            )
-
-        element_values = (
-            metadata.get(
-                "elements",
-                [],
-            )
-            or []
-        )
-
-        pair_labels = (
-            metadata.get(
-                "pair_labels",
-                [],
-            )
-            or []
-        )
-
-        site_records = (
-            metadata.get(
-                "site_records",
-                [],
-            )
-            or []
-        )
-
-        self._element_biso_elements = {
-            clean_el_symbol(
-                element
-            )
-            for element in element_values
-            if clean_el_symbol(
-                element
-            )
-        }
-
-        self._pair_labels_for_dynamics = [
-            str(pair)
-            for pair in pair_labels
-        ]
-
         try:
-            self.lambda_list.set_pairs(
-                self._pair_labels_for_dynamics
-            )
+            self._element_biso_elements = {
+                clean_el_symbol(str(site.specie))
+                for site in s.sites
+                if clean_el_symbol(str(site.specie))
+            }
         except Exception:
+            self._element_biso_elements = set()
+
+
+        # --- Pair options (per-species/oxidation unordered pairs) ---
+        try:
+            labels = sorted(
+                {lambda_safe_species_label(str(site.specie)) for site in s.sites},
+                key=lambda x: x.lower(),
+            )
+            pairs = [f"{a}-{b}" for a, b in itertools.combinations_with_replacement(labels, 2)]
+            self.lambda_list.set_pairs(pairs)
+            self._pair_labels_for_dynamics = list(pairs)
+        except Exception:
+            # If anything goes wrong, keep whatever pairs are currently shown
+            self._pair_labels_for_dynamics = []
             pass
 
-        enabled = {
-            "scale"
-        }
+        enabled = {"scale"}
+        sga = None
+        cs = ""
 
-        if crystal_system == "cubic":
-            enabled |= {
-                "a"
-            }
-
-        elif crystal_system == "tetragonal":
-            enabled |= {
-                "a",
-                "c",
-            }
-
-        elif crystal_system == "orthorhombic":
-            enabled |= {
-                "a",
-                "b",
-                "c",
-            }
-
-        elif crystal_system in (
-            "hexagonal",
-            "trigonal",
-        ):
-            enabled |= {
-                "a",
-                "c",
-                "gamma",
-            }
-
-        elif crystal_system == "monoclinic":
-            enabled |= {
-                "a",
-                "b",
-                "c",
-                "beta",
-            }
-
-        else:
-            enabled |= {
-                "a",
-                "b",
-                "c",
-                "alpha",
-                "beta",
-                "gamma",
-            }
-
-        self._sym_enabled = enabled
-
-        loaded_cf_initial = {
-            str(key).strip().lower(): value
-            for key, value in (
+        use_spacegroup_analyzer = (
+            len(s.sites)
+            <= int(
                 getattr(
                     self,
-                    "_loaded_cf_initial",
-                    {},
+                    "_symmetry_analyzer_max_sites",
+                    500,
                 )
-                or {}
-            ).items()
-        }
-
-        loaded_cf_refinable = {
-            str(key).strip().lower(): bool(value)
-            for key, value in (
-                getattr(
-                    self,
-                    "_loaded_cf_refinable",
-                    {},
-                )
-                or {}
-            ).items()
-        }
-
-        loaded_cf_bounds = {
-            str(key).strip().lower(): value
-            for key, value in (
-                getattr(
-                    self,
-                    "_loaded_cf_bounds",
-                    {},
-                )
-                or {}
-            ).items()
-        }
-
-        try:
-            current_flat = self._cf_extract()
-            current_edge, current_screw = self._cf_split(
-                current_flat
             )
-        except Exception:
-            current_edge = {}
-            current_screw = {}
-
-        edge_seed = {}
-        screw_seed = {}
-        refinable_seed = {}
-        bounds_seed = {}
-
-        for term in terms:
-            term_upper = str(
-                term
-            ).upper()
-
-            edge_key = f"Edge{term_upper}"
-            screw_key = f"Screw{term_upper}"
-
-            edge_key_lower = edge_key.lower()
-            screw_key_lower = screw_key.lower()
-
-            if edge_key_lower in loaded_cf_initial:
-                try:
-                    edge_seed[edge_key] = float(
-                        loaded_cf_initial[
-                            edge_key_lower
-                        ]
-                    )
-                except Exception:
-                    edge_seed[edge_key] = 0.0
-            else:
-                edge_seed[edge_key] = float(
-                    current_edge.get(
-                        term_upper,
-                        0.0,
-                    )
-                )
-
-            if screw_key_lower in loaded_cf_initial:
-                try:
-                    screw_seed[screw_key] = float(
-                        loaded_cf_initial[
-                            screw_key_lower
-                        ]
-                    )
-                except Exception:
-                    screw_seed[screw_key] = 0.0
-            else:
-                screw_seed[screw_key] = float(
-                    current_screw.get(
-                        term_upper,
-                        0.0,
-                    )
-                )
-
-            if edge_key_lower in loaded_cf_refinable:
-                refinable_seed[edge_key] = bool(
-                    loaded_cf_refinable[
-                        edge_key_lower
-                    ]
-                )
-
-            if screw_key_lower in loaded_cf_refinable:
-                refinable_seed[screw_key] = bool(
-                    loaded_cf_refinable[
-                        screw_key_lower
-                    ]
-                )
-
-            if edge_key_lower in loaded_cf_bounds:
-                bounds_seed[edge_key] = (
-                    loaded_cf_bounds[
-                        edge_key_lower
-                    ]
-                )
-
-            if screw_key_lower in loaded_cf_bounds:
-                bounds_seed[screw_key] = (
-                    loaded_cf_bounds[
-                        screw_key_lower
-                    ]
-                )
-
-        self._cf_set_terms(
-            terms,
-            edge_seed=edge_seed,
-            screw_seed=screw_seed,
-            refinable_seed=refinable_seed,
-            bounds_seed=bounds_seed,
         )
 
+        if use_spacegroup_analyzer:
+            try:
+                sga = SpacegroupAnalyzer(s, symprec=1e-3)
+                cs = (sga.get_crystal_system() or "").lower()
+            except Exception:
+                sga = None
+                cs = ""
+
+        if cs == "cubic":
+            enabled |= {"a"}
+        elif cs == "tetragonal":
+            enabled |= {"a", "c"}
+        elif cs == "orthorhombic":
+            enabled |= {"a", "b", "c"}
+        elif cs in ("hexagonal", "trigonal"):
+            enabled |= {"a", "c", "gamma"}
+        elif cs == "monoclinic":
+            enabled |= {"a", "b", "c", "beta"}
+        elif cs == "triclinic":
+            enabled |= {"a", "b", "c", "alpha", "beta", "gamma"}
+        else:
+            enabled |= {"a", "b", "c", "alpha", "beta", "gamma"}
+
+        # --- Contrast factor invariants (Ei) required by symmetry (space group -> Laue class) ---
+        terms: List[str] = []
+        sg_num = None
+
+        if sga is not None:
+            try:
+                sg_num = int(sga.get_space_group_number())
+            except Exception:
+                sg_num = None
+
+        if sg_num is not None:
+            try:
+                cell0 = CFCell(
+                    a=float(s.lattice.a), b=float(s.lattice.b), c=float(s.lattice.c),
+                    alpha=float(s.lattice.alpha), beta=float(s.lattice.beta), gamma=float(s.lattice.gamma),
+                )
+                terms = required_terms_for_sg(sg_num, cell0)
+            except Exception:
+                terms = []
+
+        # Preserve current GUI values where possible
+        try:
+            _old_flat = self._cf_extract()
+            _old_edge, _old_screw = self._cf_split(_old_flat)
+        except Exception:
+            _old_edge, _old_screw = ({}, {})
+
+        _edge_seed = {f"Edge{t}": float(_old_edge.get(t, 0.0)) for t in (terms or [])}
+        _screw_seed = {f"Screw{t}": float(_old_screw.get(t, 0.0)) for t in (terms or [])}
+        self._cf_set_terms(terms, edge_seed=_edge_seed, screw_seed=_screw_seed)
+
+        # --- Local dynamics: build per-ASU-site Biso parameters (CIF atom loop) ---
+        self._dyn_biso_keys = set()
+        biso_seed: Dict[str, Any] = {}
+
+        # Prefer asymmetric unit sites from CIF, otherwise fall back to unique sites (by frac coord).
+        site_list: List[Dict[str, Any]] = []
+        if asu_sites:
+            site_list = asu_sites
+        else:
+            # fall back: use unique sites (avoid full symmetry-expanded duplicates)
+            seen = set()
+            for site in s.sites:
+                el = clean_el_symbol(str(site.specie).strip())
+                f = tuple(np.round(np.asarray(site.frac_coords, float), 6).tolist())
+                key2 = (el, f)
+                if key2 in seen:
+                    continue
+                seen.add(key2)
+                site_list.append({"el": el, "frac": f, "occ": getattr(site, "occupancy", None), "biso": site.properties.get("biso", None)})
+
+        # ---------------------------------------------------------
+        # Atomic site table records for GUI.
+        #
+        # For large structures, do not populate the per-site table.
+        # QTableWidget becomes very slow with thousands of rows and many
+        # columns. Element-grouped Biso remains available through
+        # self._element_biso_elements.
+        # ---------------------------------------------------------
         self._site_records_for_gui = []
         self._site_biso_keys = set()
 
@@ -2769,140 +2016,129 @@ class InputBuilder(QtWidgets.QWidget):
             )
         )
 
-        if (
+        populate_site_table = (
             site_table_max_rows > 0
-            and len(site_records) <= site_table_max_rows
-        ):
-            for record in site_records:
-                if not isinstance(
-                    record,
-                    dict,
-                ):
+            and len(site_list) <= site_table_max_rows
+        )
+
+        if populate_site_table:
+            _label_counts: Dict[str, int] = {}
+
+            for i, site in enumerate(site_list):
+                el = clean_el_symbol(
+                    site.get(
+                        "el",
+                        site.get(
+                            "element",
+                            "",
+                        ),
+                    )
+                )
+
+                if not el:
                     continue
 
                 label = str(
-                    record.get(
+                    site.get(
                         "label",
                         "",
                     )
                     or ""
                 ).strip()
 
-                element = clean_el_symbol(
-                    record.get(
-                        "el",
-                        "",
-                    )
-                )
-
+                # Fallback label if CIF has no proper label.
                 if not label:
-                    label = (
-                        f"{element}"
-                        f"{len(self._site_records_for_gui) + 1}"
-                    )
+                    _label_counts[el] = _label_counts.get(
+                        el,
+                        0,
+                    ) + 1
+                    label = f"{el}{_label_counts[el]}"
 
-                fractional = record.get(
+                key = SiteParamTableWidget._safe_key(label)
+
+                self._site_biso_keys.add(f"biso_{key}")
+
+                frac = site.get(
                     "frac",
-                    [
+                    (
                         0.0,
                         0.0,
                         0.0,
-                    ],
+                    ),
                 )
 
                 self._site_records_for_gui.append(
                     {
                         "label": label,
-                        "el": element,
-                        "frac": fractional,
-                        "occ": record.get(
+                        "el": el,
+                        "frac": frac,
+                        "occ": site.get(
                             "occ",
                             1.0,
                         ),
-                        "biso": record.get(
+                        "biso": site.get(
                             "biso",
                             "",
                         ),
                     }
                 )
 
-                site_key = SiteParamTableWidget._safe_key(
-                    label
-                )
+        else:
+            # Large-structure mode.
+            #
+            # Keep the per-site GUI table empty. This avoids creating tens of
+            # thousands of QTableWidgetItem objects.
+            #
+            # Element Biso parameters are still created from
+            # self._element_biso_elements by _element_biso_keys_from_sites().
+            self._site_records_for_gui = []
+            self._site_biso_keys = set()
 
-                self._site_biso_keys.add(
-                    f"biso_{site_key}"
-                )
-
+        
+        # Site Biso is now handled by tbl_sites, not by the pair-dynamics table.
         self._dyn_biso_keys = set()
         self._biso_label_overrides = {}
 
-        old_dynamic_flags = dict(
-            getattr(
-                self,
-                "_dyn_use_flags",
-                {},
-            )
-            or {}
-        )
+        # Reset/update use flags for new structure.
+        #
+        # Important:
+        # Do NOT erase delta1/delta2 or pair-specific delta use flags.
+        # Only refresh Biso keys when the structure changes.
+        old_dyn_use_flags = dict(getattr(self, "_dyn_use_flags", {}) or {})
 
         if structure_changed:
+            # Keep all non-Biso flags, e.g. delta1, delta2, delta1_ca-o, delta2_ca-o.
             self._dyn_use_flags = {
-                key: bool(value)
-                for key, value in old_dynamic_flags.items()
-                if not str(key).lower().startswith(
-                    "biso_"
-                )
+                k: bool(v)
+                for k, v in old_dyn_use_flags.items()
+                if not str(k).lower().startswith("biso_")
             }
+
+            # Add Biso flags for the new structure.
+            for k in self._dyn_biso_keys:
+                self._dyn_use_flags[k] = True
+
         else:
-            self._dyn_use_flags = old_dynamic_flags
+            # Keep existing flags and ensure Biso keys exist.
+            self._dyn_use_flags = dict(old_dyn_use_flags)
 
-        seed_values = {}
+            for k in self._dyn_biso_keys:
+                self._dyn_use_flags.setdefault(k, True)
+        
+        
+        self._sym_enabled = enabled
 
-        for lattice_name in (
-            "a",
-            "b",
-            "c",
-            "alpha",
-            "beta",
-            "gamma",
-        ):
-            if lattice_name not in lattice_values:
-                continue
+        # (3) push lattice -> tables (solo se mancante)
+        self._set_struct_from_structure(s)
 
-            try:
-                seed_values[lattice_name] = float(
-                    lattice_values[
-                        lattice_name
-                    ]
-                )
-            except Exception:
-                pass
-
+        # Rebuild tables from current values, but drop stale per-site Biso values when structure changed.
         self._apply_params_to_tables_from_current(
             drop_prefixes=tuple(),
-            seed_overrides=seed_values,
+            seed_overrides=biso_seed,
             keep_keys=set(),
         )
 
-        self._last_structure_path = path
-
-        self._loaded_structure = None
-
-        try:
-            self._loaded_structure_path = os.path.abspath(
-                path
-            )
-        except Exception:
-            self._loaded_structure_path = path
-
-        try:
-            self._loaded_structure_mtime = os.path.getmtime(
-                path
-            )
-        except Exception:
-            self._loaded_structure_mtime = None
-
+        self._last_structure_path = str(path or "").strip()
 
     def _apply_params_to_tables(
         self,
@@ -3166,37 +2402,6 @@ class InputBuilder(QtWidgets.QWidget):
             initial,
             refinable,
             bounds,
-            tooltips={
-                "qdamp": (
-                    "Instrumental Q-resolution damping parameter.\n\n"
-                    "The PDF is multiplied approximately by:\n"
-                    "exp(-0.5 * qdamp^2 * r^2)."
-                ),
-                "delta_broad": (
-                    "Additional Gaussian PDF peak broadening that increases "
-                    "linearly with pair distance.\n\n"
-                    "It contributes (delta_broad * r)^2 to the peak variance."
-                ),
-                "qmax": (
-                    "Maximum Q value, in Å^-1, used for finite-Qmax "
-                    "termination of the calculated PDF.\n\n"
-                    "A finite Qmax produces the familiar sinc-like termination ripples."
-                ),
-                "qmax_zeros": (
-                    "Number of zero crossings retained in the finite-Qmax "
-                    "sinc termination kernel.\n\n"
-                    "This is NOT the number of FFT zeros.\n\n"
-                    "The approximate kernel half-width is:\n"
-                    "qmax_zeros * pi / qmax.\n\n"
-                    "Larger values retain more of the sinc kernel and are more "
-                    "accurate, but can be slower. Typical values are 5 to 8."
-                ),
-                "qmax_pad": (
-                    "Boundary padding mode used for the finite-Qmax termination "
-                    "convolution.\n\n"
-                    "Usually use 'zero'."
-                ),
-            },
         )
 
         self.tbl_size.set_params(
@@ -3629,113 +2834,6 @@ class InputBuilder(QtWidgets.QWidget):
                     self.spin_progress.setValue(float(prog))
                 except Exception:
                     pass
-            # ---------------------------------------------------------
-            # Numerical CPU/GPU backend settings
-            # ---------------------------------------------------------
-            def _set_backend_combo(
-                combo: QtWidgets.QComboBox,
-                raw_value,
-                default: str = "cpu",
-            ) -> None:
-                value = str(
-                    raw_value
-                    if raw_value is not None
-                    else default
-                ).strip().lower()
-
-                aliases = {
-                    "gpu": "cuda",
-                    "cupy": "cuda",
-                    "nvidia": "cuda",
-                    "automatic": "auto",
-                }
-
-                value = aliases.get(
-                    value,
-                    value,
-                )
-
-                if value not in (
-                    "cpu",
-                    "cuda",
-                    "auto",
-                ):
-                    value = default
-
-                index = combo.findData(
-                    value
-                )
-
-                if index >= 0:
-                    combo.setCurrentIndex(
-                        index
-                    )
-
-            shell_backend = refsec.get(
-                "shell_backend",
-                cfg.get(
-                    "shell_backend",
-                    "cpu",
-                ),
-            )
-
-            _set_backend_combo(
-                self.combo_shell_backend,
-                shell_backend,
-                default="cpu",
-            )
-
-            pdf_backend = refsec.get(
-                "pdf_backend",
-                cfg.get(
-                    "pdf_backend",
-                    "cpu",
-                ),
-            )
-
-            _set_backend_combo(
-                self.combo_pdf_backend,
-                pdf_backend,
-                default="cpu",
-            )
-
-            gpu_device = refsec.get(
-                "gpu_device",
-                cfg.get(
-                    "gpu_device",
-                    0,
-                ),
-            )
-
-            try:
-                self.spin_gpu_device.setValue(
-                    int(
-                        gpu_device
-                    )
-                )
-            except Exception:
-                self.spin_gpu_device.setValue(
-                    0
-                )
-
-            gpu_memory_fraction = refsec.get(
-                "gpu_memory_fraction",
-                cfg.get(
-                    "gpu_memory_fraction",
-                    0.70,
-                ),
-            )
-
-            try:
-                self.spin_gpu_memory_fraction.setValue(
-                    float(
-                        gpu_memory_fraction
-                    )
-                )
-            except Exception:
-                self.spin_gpu_memory_fraction.setValue(
-                    0.70
-                )
 
             # ---- SAXS / missing-low-Q belly settings ----
             try:
@@ -3829,129 +2927,16 @@ class InputBuilder(QtWidgets.QWidget):
                 pass
 
             # ---- parameters ----
-            initial = cfg.get(
-                "initial_values",
-                cfg.get(
-                    "initial",
-                    {},
-                ),
-            )
+            initial = cfg.get("initial_values", cfg.get("initial", {}))
+            refinable = cfg.get("refinable_parameters", cfg.get("refinable", {}))
+            bounds = cfg.get("bounds", {})
 
-            refinable = cfg.get(
-                "refinable_parameters",
-                cfg.get(
-                    "refinable",
-                    {},
-                ),
-            )
-
-            bounds = cfg.get(
-                "bounds",
-                {},
-            )
-
-            if not isinstance(
-                initial,
-                dict,
-            ):
+            if not isinstance(initial, dict):
                 initial = {}
-
-            if not isinstance(
-                refinable,
-                dict,
-            ):
+            if not isinstance(refinable, dict):
                 refinable = {}
-
-            if not isinstance(
-                bounds,
-                dict,
-            ):
+            if not isinstance(bounds, dict):
                 bounds = {}
-
-            # ---------------------------------------------------------
-            # Preserve contrast-factor parameters while the structure
-            # and GUI tables are being reconstructed.
-            # ---------------------------------------------------------
-            self._loaded_cf_initial = {}
-            self._loaded_cf_refinable = {}
-            self._loaded_cf_bounds = {}
-
-            for parameter_name, parameter_value in initial.items():
-                parameter_name_lower = str(
-                    parameter_name
-                ).strip().lower()
-
-                if (
-                    parameter_name_lower
-                    in {
-                        "cedgea",
-                        "cedgeb",
-                        "cscrewa",
-                        "cscrewb",
-                        "burgers_mag",
-                        "burgers",
-                        "b_mag",
-                    }
-                    or re.match(
-                        r"^(edge|screw)[_ ]*e\d+$",
-                        parameter_name_lower,
-                    )
-                ):
-                    self._loaded_cf_initial[
-                        str(parameter_name)
-                    ] = parameter_value
-
-            for parameter_name, parameter_value in refinable.items():
-                parameter_name_lower = str(
-                    parameter_name
-                ).strip().lower()
-
-                if (
-                    parameter_name_lower
-                    in {
-                        "cedgea",
-                        "cedgeb",
-                        "cscrewa",
-                        "cscrewb",
-                        "burgers_mag",
-                        "burgers",
-                        "b_mag",
-                    }
-                    or re.match(
-                        r"^(edge|screw)[_ ]*e\d+$",
-                        parameter_name_lower,
-                    )
-                ):
-                    self._loaded_cf_refinable[
-                        str(parameter_name)
-                    ] = bool(
-                        parameter_value
-                    )
-
-            for parameter_name, parameter_value in bounds.items():
-                parameter_name_lower = str(
-                    parameter_name
-                ).strip().lower()
-
-                if (
-                    parameter_name_lower
-                    in {
-                        "cedgea",
-                        "cedgeb",
-                        "cscrewa",
-                        "cscrewb",
-                        "burgers_mag",
-                        "burgers",
-                        "b_mag",
-                    }
-                    or re.match(
-                        r"^(edge|screw)[_ ]*e\d+$",
-                        parameter_name_lower,
-                    )
-                ):
-                    self._loaded_cf_bounds[
-                        str(parameter_name)
-                    ] = parameter_value
 
             # ---------------------------------------------------------
             # Rebuild Local dynamics Use? flags from the loaded input.
@@ -4103,16 +3088,8 @@ class InputBuilder(QtWidgets.QWidget):
 
             # Now update symmetry-derived availability and any missing lattice defaults from structure,
             # while preserving the values that were just loaded.
-            load_start = time.perf_counter()
+            self._update_symmetry_from_structure(structure_path)
 
-            self._update_symmetry_from_structure(
-                structure_path
-            )
-
-            print(
-                "[BUILDER TIMING] Structure metadata and GUI tables: "
-                f"{time.perf_counter() - load_start:.3f} s"
-            )
 
             
             # ---------------------------------------------------------
@@ -4302,149 +3279,63 @@ class InputBuilder(QtWidgets.QWidget):
                 except Exception:
                     pass
 
-                # -------------------------------------------------
                 # Seed invariant Edge/Screw coefficients.
-                #
-                # Values may come from either:
-                #   1. normal parameters in [initial_values], or
-                #   2. the deprecated [contrast_factors] section.
-                # -------------------------------------------------
-                edgeE, screwE = self._cf_split(
-                    coeffs_in
-                )
+                edgeE, screwE = self._cf_split(coeffs_in)
+                coeffs_has_ei = bool(edgeE) or bool(screwE)
 
-                input_terms = (
-                    self._contrast_terms_from_loaded_parameters()
-                )
-
-                coeffs_has_ei = bool(
-                    edgeE
-                    or screwE
-                    or input_terms
-                )
-
-                terms = list(
-                    getattr(
-                        self,
-                        "_cf_terms",
-                        [],
-                    )
-                    or []
-                )
-
+                terms = list(self._cf_terms) if getattr(self, "_cf_terms", None) else []
                 if not terms:
-                    terms = sorted(
-                        (
-                            set(edgeE.keys())
-                            | set(screwE.keys())
-                            | set(input_terms)
-                        ),
-                        key=lambda term: (
-                            int(term[1:])
-                            if (
-                                len(term) > 1
-                                and term[1:].isdigit()
-                            )
-                            else 999
-                        ),
+                    allE = sorted(
+                        set(edgeE.keys()) | set(screwE.keys()),
+                        key=lambda s: int(s[1:]) if s[1:].isdigit() else 999,
                     )
+                    terms = allE
 
                 edge_seed = {}
                 screw_seed = {}
                 cf_ref_seed = {}
                 cf_bnd_seed = {}
 
-                initial_lc = {
-                    str(key).strip().lower(): value
-                    for key, value in initial.items()
-                }
-
-                refinable_lc = {
-                    str(key).strip().lower(): bool(value)
-                    for key, value in refinable.items()
-                }
-
-                bounds_lc = {
-                    str(key).strip().lower(): value
-                    for key, value in bounds_norm.items()
-                }
-
-
                 for t in terms:
-                    term_upper = str(
-                        t
-                    ).upper()
-
-                    edge_key = f"Edge{term_upper}"
-                    screw_key = f"Screw{term_upper}"
+                    # t is like E1, E2, ...
+                    edge_key = f"Edge{t}"
+                    screw_key = f"Screw{t}"
 
                     edge_lc = edge_key.lower()
                     screw_lc = screw_key.lower()
 
-                    if edge_lc in initial_lc:
-                        edge_seed[edge_key] = float(
-                            initial_lc[
-                                edge_lc
-                            ]
-                        )
-                    else:
-                        edge_seed[edge_key] = float(
-                            edgeE.get(
-                                term_upper,
-                                0.0,
-                            )
-                        )
+                    # Values: initial_values override contrast_factors
+                    edge_seed[edge_key] = edgeE.get(
+                        t,
+                        initial.get(edge_key, initial.get(edge_lc, 0.0)),
+                    )
+                    screw_seed[screw_key] = screwE.get(
+                        t,
+                        initial.get(screw_key, initial.get(screw_lc, 0.0)),
+                    )
 
-                    if screw_lc in initial_lc:
-                        screw_seed[screw_key] = float(
-                            initial_lc[
-                                screw_lc
-                            ]
-                        )
-                    else:
-                        screw_seed[screw_key] = float(
-                            screwE.get(
-                                term_upper,
-                                0.0,
-                            )
-                        )
+                    # Refine flags
+                    if edge_key in refinable:
+                        cf_ref_seed[edge_key] = bool(refinable.get(edge_key, False))
+                    elif edge_lc in refinable:
+                        cf_ref_seed[edge_key] = bool(refinable.get(edge_lc, False))
 
-                    if edge_lc in refinable_lc:
-                        cf_ref_seed[edge_key] = bool(
-                            refinable_lc[
-                                edge_lc
-                            ]
-                        )
+                    if screw_key in refinable:
+                        cf_ref_seed[screw_key] = bool(refinable.get(screw_key, False))
+                    elif screw_lc in refinable:
+                        cf_ref_seed[screw_key] = bool(refinable.get(screw_lc, False))
 
-                    if screw_lc in refinable_lc:
-                        cf_ref_seed[screw_key] = bool(
-                            refinable_lc[
-                                screw_lc
-                            ]
-                        )
+                    # Bounds
+                    if edge_key in bounds_norm:
+                        cf_bnd_seed[edge_key] = bounds_norm.get(edge_key)
+                    elif edge_lc in bounds_norm:
+                        cf_bnd_seed[edge_key] = bounds_norm.get(edge_lc)
 
-                    if edge_lc in bounds_lc:
-                        cf_bnd_seed[edge_key] = (
-                            bounds_lc[
-                                edge_lc
-                            ]
-                        )
+                    if screw_key in bounds_norm:
+                        cf_bnd_seed[screw_key] = bounds_norm.get(screw_key)
+                    elif screw_lc in bounds_norm:
+                        cf_bnd_seed[screw_key] = bounds_norm.get(screw_lc)
 
-                    if screw_lc in bounds_lc:
-                        cf_bnd_seed[screw_key] = (
-                            bounds_lc[
-                                screw_lc
-                            ]
-                        )
-
-                print(
-                    "[BUILDER CF] "
-                    f"terms={terms}, "
-                    f"edge={edge_seed}, "
-                    f"screw={screw_seed}"
-                )
-
-                
                 self._cf_set_terms(
                     terms,
                     edge_seed=edge_seed,
@@ -4517,46 +3408,18 @@ class InputBuilder(QtWidgets.QWidget):
             ).strip().lower()
 
             try:
-                if micro_model in (
-                    "pah",
-                    "adler-houska",
-                    "adler_houska",
-                ):
-                    selected_micro_index = 2
-
-                elif micro_model in (
-                    "wilkens",
-                    "wilkins",
-                    "dislocation",
-                ):
-                    selected_micro_index = 1
-
+                if micro_model in ("pah", "adler-houska", "adler_houska"):
+                    self.combo_micro_model.setCurrentIndex(2)
+                elif micro_model in ("wilkens", "wilkins", "dislocation"):
+                    self.combo_micro_model.setCurrentIndex(1)
                 elif pah_present:
-                    selected_micro_index = 2
-
+                    self.combo_micro_model.setCurrentIndex(2)
                 elif wilkens_present:
-                    selected_micro_index = 1
-
+                    self.combo_micro_model.setCurrentIndex(1)
                 else:
-                    selected_micro_index = 0
-
-                self.combo_micro_model.blockSignals(True)
-
-                self.combo_micro_model.setCurrentIndex(
-                    selected_micro_index
-                )
-
-                self.combo_micro_model.blockSignals(False)
-
-                self._on_micro_model_changed()
-
+                    self.combo_micro_model.setCurrentIndex(0)
             except Exception:
-                try:
-                    self.combo_micro_model.blockSignals(
-                        False
-                    )
-                except Exception:
-                    pass
+                pass
 
             # ---- constraints ----
             try:
@@ -4621,23 +3484,6 @@ class InputBuilder(QtWidgets.QWidget):
                 "xtol": float(self.spin_xtol.value()),
                 "gtol": float(self.spin_gtol.value()),
                 "progress_every_sec": float(self.spin_progress.value()),
-                "shell_backend": str(
-                    self.combo_shell_backend.currentData()
-                    or "cpu"
-                ),
-
-                "pdf_backend": str(
-                    self.combo_pdf_backend.currentData()
-                    or "cpu"
-                ),
-
-                "gpu_device": int(
-                    self.spin_gpu_device.value()
-                ),
-
-                "gpu_memory_fraction": float(
-                    self.spin_gpu_memory_fraction.value()
-                ),
             },
             "initial_values": {},
             "refinable_parameters": {},
@@ -5370,35 +4216,6 @@ class InputBuilder(QtWidgets.QWidget):
             self.spin_xtol.setValue(1e-3)
             self.spin_gtol.setValue(1e-3)
             self.spin_progress.setValue(0.5)
-            try:
-                shell_cpu_index = self.combo_shell_backend.findData(
-                    "cpu"
-                )
-
-                if shell_cpu_index >= 0:
-                    self.combo_shell_backend.setCurrentIndex(
-                        shell_cpu_index
-                    )
-
-                pdf_cpu_index = self.combo_pdf_backend.findData(
-                    "cpu"
-                )
-
-                if pdf_cpu_index >= 0:
-                    self.combo_pdf_backend.setCurrentIndex(
-                        pdf_cpu_index
-                    )
-
-                self.spin_gpu_device.setValue(
-                    0
-                )
-
-                self.spin_gpu_memory_fraction.setValue(
-                    0.70
-                )
-
-            except Exception:
-                pass
             self._sym_enabled = None
             self._biso_label_overrides = {}
             self._dyn_biso_keys = set()
@@ -5442,9 +4259,6 @@ class InputBuilder(QtWidgets.QWidget):
             self._site_use_flags = {}
 
             self._crystallite_shape_spec = {}
-            self._loaded_cf_initial = {}
-            self._loaded_cf_refinable = {}
-            self._loaded_cf_bounds = {}
 
             try:
                 self.combo_size_model.setCurrentIndex(0)

@@ -1,0 +1,96 @@
+{
+  "format": "hkl-pdf-structure-view",
+  "version": 1,
+  "saved_at": "2026-09-28T12:14:45",
+  "structure_path": "Z:\\Softwares\\pdf_fitting_project\\test_Seminar\\Fe_bcc_300K.cif",
+  "input_path": "Z:/Softwares/pdf_fitting_project/test_Seminar/input.inp",
+  "element_styles": {
+    "Fe": {
+      "radius": 0.48,
+      "color": "#E06633",
+      "visible": true,
+      "show_label": false,
+      "opacity": 1.0
+    }
+  },
+  "site_styles": {
+    "0": {},
+    "1": {
+      "radius": 0.48,
+      "color": "#E06633",
+      "visible": true,
+      "show_label": false,
+      "opacity": 1.0
+    }
+  },
+  "display": {
+    "show_atoms": true,
+    "show_cell": false,
+    "show_lattice_vectors": false,
+    "show_labels": false,
+    "orthographic": true,
+    "atom_scale": 0.88,
+    "background": [
+      0.9568627450980393,
+      0.9568627450980393,
+      0.9568627450980393
+    ]
+  },
+  "supercell": {
+    "repeat_a": 1,
+    "repeat_b": 3,
+    "repeat_c": 1,
+    "boundary_images": true
+  },
+  "bonds": {
+    "enabled": true,
+    "two_color": true,
+    "tolerance_scale": 0.5,
+    "minimum_distance": 0.1,
+    "maximum_distance": 4.0,
+    "radius": 0.08,
+    "opacity": 1.0
+  },
+  "polyhedra": {
+    "requested": false,
+    "visible": false,
+    "central_element": "Fe",
+    "neighbor_element": "Fe",
+    "display_mode": "all",
+    "face_color": "#4A90E2",
+    "edge_color": "#1F4F8A",
+    "opacity": 1.0,
+    "edge_width": 2.0
+  },
+  "camera": {
+    "camera_position": [
+      [
+        -20.28186738578034,
+        20.60923544221561,
+        -12.470173359949456
+      ],
+      [
+        1.4342174256266338,
+        4.3026522768799,
+        1.4342174256266338
+      ],
+      [
+        -0.5715169052126069,
+        -0.0635030693323759,
+        0.8181294440622289
+      ]
+    ],
+    "parallel_projection": true
+  },
+  "window": {
+    "splitter_sizes": [
+      510,
+      1154
+    ],
+    "tab_index": 0,
+    "size": [
+      1680,
+      979
+    ]
+  }
+}

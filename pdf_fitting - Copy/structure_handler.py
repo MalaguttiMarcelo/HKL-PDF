@@ -27,7 +27,7 @@ CACHE_DIR = user_cache_dir(
     "shell_cache"
 )
 
-CACHE_VERSION = "shell_cache_hybrid_v11_cuda_grouping_test"
+CACHE_VERSION = "shell_cache_hybrid_v10_image_strategy"
 
 def clean_element_name(name: str) -> str:
     """Return clean chemical element symbol, e.g. Fe0+ -> Fe."""
@@ -461,82 +461,9 @@ def group_shells(entries):
 
 
 class StructureHandler:
-    def __init__(
-        self,
-        cif_path: str,
-        r_max: float,
-        *,
-        backend_config=None,
-    ):
-        self.backend_config = dict(
-            backend_config
-            or {}
-        )
-
-        self.shell_backend_requested = str(
-            self.backend_config.get(
-                "shell_backend",
-                "cpu",
-            )
-        ).strip().lower()
-
-        self.gpu_device = int(
-            self.backend_config.get(
-                "gpu_device",
-                0,
-            )
-        )
-
-        self.gpu_memory_fraction = float(
-            self.backend_config.get(
-                "gpu_memory_fraction",
-                0.70,
-            )
-        )
-
-        self.shell_backend_active = "cpu"
-
-        if self.shell_backend_requested in (
-            "cuda",
-            "gpu",
-            "cupy",
-            "auto",
-        ):
-            try:
-                from pdf_fitting.models.gpu.backend import (
-                    gpu_summary,
-                    resolve_backend,
-                )
-
-                self.shell_backend_active = resolve_backend(
-                    self.shell_backend_requested,
-                    default="cpu",
-                )
-
-                if self.shell_backend_active == "cuda":
-                    print(
-                        "[CUDA SHELLS] "
-                        + gpu_summary(
-                            self.gpu_device
-                        )
-                    )
-
-            except Exception as exc:
-                if self.shell_backend_requested in (
-                    "cuda",
-                    "gpu",
-                    "cupy",
-                ):
-                    raise
-
-                self.shell_backend_active = "cpu"
-
-                print(
-                    "[CUDA SHELLS] Falling back to CPU: "
-                    f"{exc}"
-                )
-
+    def __init__(self, cif_path: str, r_max: float):
         # Use fast CIF parser for simple/P1 CIFs when possible.
+        # This avoids expensive parsing of huge bond loops from Materials Studio CIFs.
         try:
             if str(cif_path).lower().endswith(".cif"):
                 from pdf_fitting.gui.cif_utils import read_cif_asu_sites
@@ -554,11 +481,12 @@ class StructureHandler:
             self.structure = Structure.from_file(cif_path)
 
         self.r_max = r_max
+        # Generate shells slightly beyond r_max so we don't need to rebuild shells
+        # during refinement of lattice parameters.
         self.r_max_cache = float(r_max) * 1.10
         self.constraints = get_lattice_constraints(self.structure)
         self._shell_table = None
         self.shells = self._generate_shells_fast_cached()
-
 
     def update_lattice(self, lattice_params: dict):
         """
@@ -1200,206 +1128,35 @@ class StructureHandler:
                 "upair_list": [],
             }
 
-        # ------------------------------------------------------------------
-        # Bucket key:
-        #   lambda alpha id
-        #   lambda beta id
-        #   distance bin
-        #   reduced direction h, k, l
-        #
-        # CUDA grouping is optional. The existing NumPy implementation remains
-        # the fallback and reference path.
-        # ------------------------------------------------------------------
+        # ---- Bucket key: (a_id, b_id, dist_1e5, dh, dk, dl) ----
         t_group0 = time.perf_counter()
 
-        dist_i = np.rint(
-            dists
-            * 1.0e5
-        ).astype(
-            np.int32
+        dist_i = np.rint(dists * 1e5).astype(np.int32)
+
+        key = np.zeros(len(dists), dtype=[
+            ("a", np.int16), ("b", np.int16), ("di", np.int32),
+            ("dh", np.int16), ("dk", np.int16), ("dl", np.int16)
+        ])
+        # Group pair type by lambda/species labels, not just element.
+        # This allows Fe0+ and Fe2+ to have different lambda coefficients.
+        key["a"] = lam_a_id
+        key["b"] = lam_b_id
+        key["di"] = dist_i
+        key["dh"] = dh.astype(np.int16)
+        key["dk"] = dk.astype(np.int16)
+        key["dl"] = dl.astype(np.int16)
+
+        t_unique0 = time.perf_counter()
+        uniq, first_idx, inv, counts = np.unique(
+            key, return_index=True, return_inverse=True, return_counts=True
         )
+        t_unique1 = time.perf_counter()
 
-        gpu_group_result = None
-
-        if (
-            getattr(
-                self,
-                "shell_backend_active",
-                "cpu",
-            )
-            == "cuda"
-        ):
-            try:
-                from pdf_fitting.models.gpu.shell_grouping import (
-                    group_shell_rows_cuda,
-                )
-
-                t_unique0 = time.perf_counter()
-
-                gpu_group_result = group_shell_rows_cuda(
-                    lambda_alpha_id=lam_a_id,
-                    lambda_beta_id=lam_b_id,
-                    distance_integer=dist_i,
-                    direction_h=dh,
-                    direction_k=dk,
-                    direction_l=dl,
-                    alpha_weight_row=alpha_weight_row,
-                    device_id=int(
-                        self.gpu_device
-                    ),
-                    memory_fraction=float(
-                        self.gpu_memory_fraction
-                    ),
-                )
-
-                t_unique1 = time.perf_counter()
-
-                first_idx = np.asarray(
-                    gpu_group_result[
-                        "first_idx"
-                    ],
-                    dtype=np.int64,
-                )
-
-                counts = np.asarray(
-                    gpu_group_result[
-                        "counts"
-                    ],
-                    dtype=np.int32,
-                )
-
-                shell_mult_eff_grouped = np.asarray(
-                    gpu_group_result[
-                        "shell_mult_eff"
-                    ],
-                    dtype=np.float32,
-                )
-
-                n_group = int(
-                    first_idx.size
-                )
-
-                uniq = np.zeros(
-                    n_group,
-                    dtype=[
-                        ("a", np.int16),
-                        ("b", np.int16),
-                        ("di", np.int32),
-                        ("dh", np.int16),
-                        ("dk", np.int16),
-                        ("dl", np.int16),
-                    ],
-                )
-
-                uniq["a"] = np.asarray(
-                    gpu_group_result[
-                        "lambda_alpha"
-                    ],
-                    dtype=np.int16,
-                )
-
-                uniq["b"] = np.asarray(
-                    gpu_group_result[
-                        "lambda_beta"
-                    ],
-                    dtype=np.int16,
-                )
-
-                uniq["di"] = np.asarray(
-                    gpu_group_result[
-                        "distance_integer"
-                    ],
-                    dtype=np.int32,
-                )
-
-                uniq["dh"] = np.asarray(
-                    gpu_group_result[
-                        "direction_h"
-                    ],
-                    dtype=np.int16,
-                )
-
-                uniq["dk"] = np.asarray(
-                    gpu_group_result[
-                        "direction_k"
-                    ],
-                    dtype=np.int16,
-                )
-
-                uniq["dl"] = np.asarray(
-                    gpu_group_result[
-                        "direction_l"
-                    ],
-                    dtype=np.int16,
-                )
-
-                inv = None
-
-                print(
-                    f"[CUDA SHELLS] Grouping: "
-                    f"{len(dists):,} rows -> {len(uniq):,} shells "
-                    f"in {t_unique1 - t_unique0:.2f} s"
-                )
-
-            except Exception as exc:
-                print(
-                    "[CUDA SHELLS] GPU grouping failed; "
-                    f"using NumPy grouping: {exc}"
-                )
-
-                if self.shell_backend_requested in (
-                    "cuda",
-                    "gpu",
-                    "cupy",
-                ):
-                    raise
-
-                gpu_group_result = None
-
-        if gpu_group_result is None:
-            key = np.zeros(
-                len(dists),
-                dtype=[
-                    ("a", np.int16),
-                    ("b", np.int16),
-                    ("di", np.int32),
-                    ("dh", np.int16),
-                    ("dk", np.int16),
-                    ("dl", np.int16),
-                ],
-            )
-
-            key["a"] = lam_a_id
-            key["b"] = lam_b_id
-            key["di"] = dist_i
-            key["dh"] = dh.astype(
-                np.int16
-            )
-            key["dk"] = dk.astype(
-                np.int16
-            )
-            key["dl"] = dl.astype(
-                np.int16
-            )
-
-            t_unique0 = time.perf_counter()
-
-            uniq, first_idx, inv, counts = np.unique(
-                key,
-                return_index=True,
-                return_inverse=True,
-                return_counts=True,
-            )
-
-            t_unique1 = time.perf_counter()
-
-            shell_mult_eff_grouped = None
-
-            print(
-                f"[SHELLS] NumPy grouping: "
-                f"{len(dists):,} rows -> {len(uniq):,} shells "
-                f"in {t_unique1 - t_unique0:.2f} s"
-            )        
+        print(
+            f"[SHELLS] Grouping with np.unique: "
+            f"{len(dists)} neighbor rows -> {len(uniq)} shells "
+            f"in {t_unique1 - t_unique0:.2f} s"
+        )
 
         # Representative vectors from first occurrence in each group
                 # ------------------------------------------------------------------
@@ -1423,23 +1180,11 @@ class StructureHandler:
         shell_mult = counts.astype(np.int32, copy=False)
 
         # Effective alpha-site-averaged multiplicity for PDF normalization.
-        if shell_mult_eff_grouped is not None:
-            shell_mult_eff = np.asarray(
-                shell_mult_eff_grouped,
-                dtype=np.float32,
-            )
-
-        else:
-            shell_mult_eff = np.bincount(
-                inv.astype(
-                    np.int64
-                ),
-                weights=alpha_weight_row,
-                minlength=n_shell,
-            ).astype(
-                np.float32,
-                copy=False,
-            )
+        shell_mult_eff = np.bincount(
+            inv.astype(np.int64),
+            weights=alpha_weight_row,
+            minlength=n_shell,
+        ).astype(np.float32, copy=False)
 
         shell_hkl = hkl[rep].astype(np.int16, copy=False)
         shell_dir = np.stack(
@@ -1619,113 +1364,12 @@ class StructureHandler:
         # This avoids expensive np.unique(axis=0) after loading cache.
         try:
             dirs_i32 = shell_table["shell_direction"].astype(np.int32, copy=False)
-            if (
-                getattr(
-                    self,
-                    "shell_backend_active",
-                    "cpu",
-                )
-                == "cuda"
-            ):
-                try:
-                    from pdf_fitting.models.gpu.shell_grouping import (
-                        unique_int3_cuda,
-                    )
-
-                    t_direction_gpu = time.perf_counter()
-
-                    (
-                        strain_unique_dirs,
-                        strain_inv_dirs,
-                    ) = unique_int3_cuda(
-                        dirs_i32,
-                        device_id=int(
-                            self.gpu_device
-                        ),
-                        memory_fraction=float(
-                            self.gpu_memory_fraction
-                        ),
-                    )
-
-                    print(
-                        "[CUDA SHELLS] Unique strain directions: "
-                        f"{dirs_i32.shape[0]:,} rows -> "
-                        f"{strain_unique_dirs.shape[0]:,} directions "
-                        f"in {time.perf_counter() - t_direction_gpu:.2f} s"
-                    )
-
-                except Exception as exc:
-                    print(
-                        "[CUDA SHELLS] GPU unique-direction generation "
-                        f"failed; using NumPy: {exc}"
-                    )
-
-                    if self.shell_backend_requested in (
-                        "cuda",
-                        "gpu",
-                        "cupy",
-                    ):
-                        raise
-
-                    (
-                        strain_unique_dirs,
-                        strain_inv_dirs,
-                    ) = np.unique(
-                        dirs_i32,
-                        axis=0,
-                        return_inverse=True,
-                    )
-
-            else:
-                (
-                    strain_unique_dirs,
-                    strain_inv_dirs,
-                ) = np.unique(
-                    dirs_i32,
-                    axis=0,
-                    return_inverse=True,
-                )
-
-            #diagnostics
-            #----------------------
-
-            print(
-                "[DIRECTION DIAG] "
-                f"shell_rows={dirs_i32.shape[0]:,}, "
-                f"unique_directions={strain_unique_dirs.shape[0]:,}"
+            strain_unique_dirs, strain_inv_dirs = np.unique(
+                dirs_i32,
+                axis=0,
+                return_inverse=True,
             )
-            
-            if strain_unique_dirs.shape[0] > 0:
-                max_abs_direction = int(
-                    np.max(
-                        np.abs(
-                            strain_unique_dirs.astype(np.int64)
-                        )
-                    )
-                )
-            
-                print(
-                    "[DIRECTION DIAG] "
-                    f"maximum absolute direction index={max_abs_direction:,}"
-                )
-            
-                direction_norm = np.sqrt(
-                    np.sum(
-                        strain_unique_dirs.astype(np.float64) ** 2,
-                        axis=1,
-                    )
-                )
-            
-                print(
-                    "[DIRECTION DIAG] "
-                    f"direction norm median={np.median(direction_norm):.3f}, "
-                    f"p95={np.percentile(direction_norm, 95):.3f}, "
-                    f"maximum={np.max(direction_norm):.3f}"
-                )
 
-            #----------------------------
-
-            
             shell_table["strain_unique_dirs"] = strain_unique_dirs.astype(np.int32, copy=False)
             shell_table["strain_inv_dirs"] = strain_inv_dirs.astype(np.int32, copy=False)
 

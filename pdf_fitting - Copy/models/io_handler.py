@@ -224,18 +224,8 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     # This allows constraint expressions like "a%b" or strings containing '%'
     # without breaking parsing.
     config_raw = configparser.RawConfigParser()
-    config_raw.optionxform = str
+    config_raw.read(filename)
 
-    read_ok = config_raw.read(
-        filename,
-        encoding="utf-8-sig",
-    )
-
-    if not read_ok:
-        raise FileNotFoundError(
-            f"Input file could not be read: {filename}"
-        )
-    
     # --- Required files section ---
     if "files" not in config_raw:
         raise KeyError("Missing [files] section.")
@@ -296,120 +286,52 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     # pair_generation
     r_extension = float(config_raw.get("pair_generation", "r_extension", fallback="1.2"))
 
-    # -----------------------------------------------------------------
-    # Contrast factors
-    #
-    # Contrast coefficients are normal numerical parameters used by the
-    # refinement engine. Old [contrast_factors] sections are migrated into
-    # the initial/refinable dictionaries for backward compatibility.
-    # -----------------------------------------------------------------
+    # contrast_factors
+    # [contrast_factors] is deprecated.
+    # If an old file contains it, migrate values into [initial_values]-style params.
     contrast_factors = {}
 
     if "contrast_factors" in config_raw:
-        contrast_factors = _parse_contrast_factors_section(
-            config_raw["contrast_factors"].items()
-        )
+        old_cf = _parse_contrast_factors_section(config_raw["contrast_factors"].items())
 
-        legacy = (
-            contrast_factors.get(
-                "legacy",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
+        try:
+            legacy = old_cf.get("legacy", {}) if isinstance(old_cf, dict) else {}
 
-        for parameter_name in (
-            "CEdgeA",
-            "CEdgeB",
-            "CScrewA",
-            "CScrewB",
-        ):
-            if parameter_name in legacy:
-                initial.setdefault(
-                    parameter_name,
-                    float(
-                        legacy[parameter_name]
-                    ),
-                )
+            if "CEdgeA" in legacy:
+                initial.setdefault("CEdgeA", float(legacy["CEdgeA"]))
+                refinable.setdefault("CEdgeA", False)
 
-                refinable.setdefault(
-                    parameter_name,
-                    False,
-                )
+            if "CEdgeB" in legacy:
+                initial.setdefault("CEdgeB", float(legacy["CEdgeB"]))
+                refinable.setdefault("CEdgeB", False)
 
-        edge_coefficients = (
-            contrast_factors.get(
-                "edge_E",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
+            if "CScrewA" in legacy:
+                initial.setdefault("CScrewA", float(legacy["CScrewA"]))
+                refinable.setdefault("CScrewA", False)
 
-        screw_coefficients = (
-            contrast_factors.get(
-                "screw_E",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
+            if "CScrewB" in legacy:
+                initial.setdefault("CScrewB", float(legacy["CScrewB"]))
+                refinable.setdefault("CScrewB", False)
 
-        for term_name, value in edge_coefficients.items():
-            parameter_name = (
-                f"Edge{str(term_name).upper()}"
-            )
+            edge_E = old_cf.get("edge_E", {}) if isinstance(old_cf, dict) else {}
+            screw_E = old_cf.get("screw_E", {}) if isinstance(old_cf, dict) else {}
 
-            initial.setdefault(
-                parameter_name,
-                float(value),
-            )
+            for ekey, val in edge_E.items():
+                pname = f"Edge{str(ekey).upper()}"   # EdgeE1, EdgeE2, ...
+                initial.setdefault(pname, float(val))
+                refinable.setdefault(pname, False)
 
-            refinable.setdefault(
-                parameter_name,
-                False,
-            )
+            for ekey, val in screw_E.items():
+                pname = f"Screw{str(ekey).upper()}"  # ScrewE1, ScrewE2, ...
+                initial.setdefault(pname, float(val))
+                refinable.setdefault(pname, False)
 
-        for term_name, value in screw_coefficients.items():
-            parameter_name = (
-                f"Screw{str(term_name).upper()}"
-            )
+            if "burgers_mag" in old_cf:
+                initial.setdefault("burgers_mag", float(old_cf["burgers_mag"]))
+                refinable.setdefault("burgers_mag", False)
 
-            initial.setdefault(
-                parameter_name,
-                float(value),
-            )
-
-            refinable.setdefault(
-                parameter_name,
-                False,
-            )
-
-        if "burgers_mag" in contrast_factors:
-            initial.setdefault(
-                "burgers_mag",
-                float(
-                    contrast_factors[
-                        "burgers_mag"
-                    ]
-                ),
-            )
-
-            refinable.setdefault(
-                "burgers_mag",
-                False,
-            )
-
+        except Exception:
+            pass
 
     # constraints
     constraints: Dict[str, str] = {}

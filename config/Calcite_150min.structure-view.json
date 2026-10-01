@@ -1,0 +1,90 @@
+{
+  "format": "hkl-pdf-structure-view",
+  "version": 1,
+  "saved_at": "2026-09-11T14:22:16",
+  "structure_path": "Z:\\Softwares\\pdf_fitting_project\\data\\Fe_bcc_300K.cif",
+  "input_path": "Z:/Softwares/pdf_fitting_project/config/Calcite_150min.inp",
+  "element_styles": {
+    "Fe": {
+      "color": "#E06633",
+      "radius": 0.48,
+      "visible": true,
+      "show_label": false,
+      "opacity": 1.0
+    }
+  },
+  "site_styles": {
+    "0": {},
+    "1": {}
+  },
+  "display": {
+    "show_atoms": true,
+    "show_cell": true,
+    "show_lattice_vectors": false,
+    "show_labels": true,
+    "orthographic": false,
+    "atom_scale": 1.0,
+    "background": [
+      0.9568627450980393,
+      0.9568627450980393,
+      0.9568627450980393
+    ]
+  },
+  "supercell": {
+    "repeat_a": 1,
+    "repeat_b": 3,
+    "repeat_c": 3,
+    "boundary_images": true
+  },
+  "bonds": {
+    "enabled": false,
+    "two_color": false,
+    "tolerance_scale": 1.15,
+    "minimum_distance": 0.1,
+    "maximum_distance": null,
+    "radius": 0.08,
+    "opacity": 1.0
+  },
+  "polyhedra": {
+    "requested": false,
+    "visible": false,
+    "central_element": "Fe",
+    "neighbor_element": "*",
+    "display_mode": "all",
+    "face_color": "#00007f",
+    "edge_color": "#1F4F8A",
+    "opacity": 0.35,
+    "edge_width": 5.0
+  },
+  "camera": {
+    "camera_position": [
+      [
+        -16.177912811415503,
+        -31.01173165099911,
+        9.101211715493807
+      ],
+      [
+        1.434231087565422,
+        4.302693173289299,
+        4.302693143486977
+      ],
+      [
+        0.05357126311259221,
+        0.1081690358603069,
+        0.9926880574730277
+      ]
+    ],
+    "parallel_projection": false
+  },
+  "window": {
+    "splitter_sizes": [
+      520,
+      1144
+    ],
+    "tab_index": 0,
+    "size": [
+      1680,
+      979
+    ]
+  }
+}

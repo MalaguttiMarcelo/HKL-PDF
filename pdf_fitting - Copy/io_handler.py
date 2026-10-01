@@ -135,7 +135,7 @@ def update_input_file_with_refined_params(input_path, refined_params, refinable_
 
     Important:
     - Preserve original key spelling when possible.
-    - Add missing GUI-generated parameters, e.g. biso_li1, delta1_ca-o.
+    - Add missing GUI-generated parameters, e.g. biso_C, biso_Co, delta1_ca-o.
     - Preserve refine flags.
     """
     config = configparser.RawConfigParser()
@@ -145,9 +145,14 @@ def update_input_file_with_refined_params(input_path, refined_params, refinable_
     def _existing_key_map(section_name: str) -> dict:
         if not config.has_section(section_name):
             return {}
-        return {k.strip().lower(): k for k in config.options(section_name)}
 
-    def _apply_updates(section_name: str, updates: dict, allow_add: bool = True) -> None:
+        # map lower-key -> original-key
+        return {
+            str(k).strip().lower(): k
+            for k in config.options(section_name)
+        }
+
+    def _apply_updates(section_name: str, updates_dict: dict, allow_add: bool = True) -> None:
         if not config.has_section(section_name):
             if allow_add:
                 config.add_section(section_name)
@@ -156,8 +161,9 @@ def update_input_file_with_refined_params(input_path, refined_params, refinable_
 
         key_map = _existing_key_map(section_name)
 
-        for k, v in (updates or {}).items():
+        for k, v in (updates_dict or {}).items():
             key = str(k).strip()
+
             if not key:
                 continue
 
@@ -169,29 +175,33 @@ def update_input_file_with_refined_params(input_path, refined_params, refinable_
             elif allow_add:
                 config.set(section_name, key, str(v))
 
-    # Add/update refined values.
+    # ---------------------------------------------------------
+    # Update refined values
+    # ---------------------------------------------------------
     _apply_updates(
         "initial_values",
         refined_params or {},
         allow_add=True,
     )
 
-    # Add/update refine flags.
-    updates = {
+    # ---------------------------------------------------------
+    # Update refine flags
+    # ---------------------------------------------------------
+    refine_updates = {
         str(k): ("True" if bool(v) else "False")
         for k, v in (refinable_flags or {}).items()
     }
 
     _apply_updates(
         "refinable_parameters",
-        updates,
+        refine_updates,
         allow_add=True,
     )
 
     with open(input_path, "w", encoding="utf-8") as configfile:
         config.write(configfile)
 
-        
+
 def write_fit_log(output_dir: str, params: dict, chi2: float, rwp: float, input_path: str):
     """
     Append a fit summary to a log file inside output_dir.
@@ -225,17 +235,12 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     # without breaking parsing.
     config_raw = configparser.RawConfigParser()
     config_raw.optionxform = str
-
-    read_ok = config_raw.read(
-        filename,
-        encoding="utf-8-sig",
-    )
-
-    if not read_ok:
-        raise FileNotFoundError(
-            f"Input file could not be read: {filename}"
-        )
     
+    read_ok = config_raw.read(filename, encoding="utf-8-sig")
+    
+    if not read_ok:
+        raise FileNotFoundError(f"Input file could not be read: {filename}")
+
     # --- Required files section ---
     if "files" not in config_raw:
         raise KeyError("Missing [files] section.")
@@ -296,121 +301,12 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     # pair_generation
     r_extension = float(config_raw.get("pair_generation", "r_extension", fallback="1.2"))
 
-    # -----------------------------------------------------------------
-    # Contrast factors
-    #
-    # Contrast coefficients are normal numerical parameters used by the
-    # refinement engine. Old [contrast_factors] sections are migrated into
-    # the initial/refinable dictionaries for backward compatibility.
-    # -----------------------------------------------------------------
+    # contrast_factors
     contrast_factors = {}
-
     if "contrast_factors" in config_raw:
-        contrast_factors = _parse_contrast_factors_section(
-            config_raw["contrast_factors"].items()
-        )
+        contrast_factors = _parse_contrast_factors_section(config_raw["contrast_factors"].items())
 
-        legacy = (
-            contrast_factors.get(
-                "legacy",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
-
-        for parameter_name in (
-            "CEdgeA",
-            "CEdgeB",
-            "CScrewA",
-            "CScrewB",
-        ):
-            if parameter_name in legacy:
-                initial.setdefault(
-                    parameter_name,
-                    float(
-                        legacy[parameter_name]
-                    ),
-                )
-
-                refinable.setdefault(
-                    parameter_name,
-                    False,
-                )
-
-        edge_coefficients = (
-            contrast_factors.get(
-                "edge_E",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
-
-        screw_coefficients = (
-            contrast_factors.get(
-                "screw_E",
-                {},
-            )
-            if isinstance(
-                contrast_factors,
-                dict,
-            )
-            else {}
-        )
-
-        for term_name, value in edge_coefficients.items():
-            parameter_name = (
-                f"Edge{str(term_name).upper()}"
-            )
-
-            initial.setdefault(
-                parameter_name,
-                float(value),
-            )
-
-            refinable.setdefault(
-                parameter_name,
-                False,
-            )
-
-        for term_name, value in screw_coefficients.items():
-            parameter_name = (
-                f"Screw{str(term_name).upper()}"
-            )
-
-            initial.setdefault(
-                parameter_name,
-                float(value),
-            )
-
-            refinable.setdefault(
-                parameter_name,
-                False,
-            )
-
-        if "burgers_mag" in contrast_factors:
-            initial.setdefault(
-                "burgers_mag",
-                float(
-                    contrast_factors[
-                        "burgers_mag"
-                    ]
-                ),
-            )
-
-            refinable.setdefault(
-                "burgers_mag",
-                False,
-            )
-
-
+    
     # constraints
     constraints: Dict[str, str] = {}
     if "constraints" in config_raw:
@@ -420,7 +316,7 @@ def read_input_file(filename: str) -> Dict[str, Any]:
             if key and expr:
                 constraints[key] = expr
 
-    # --- Microstrain validation (accept both cases: Re/re, fE/fe) ---
+# --- Microstrain validation (accept both cases: Re/re, fE/fe) ---
     # We don't force them to exist; just warn if user seems to want Wilkens.
     for name in ("rho", "re", "fe"):
         if name not in initial and name.upper() not in initial and name.capitalize() not in initial:
@@ -433,41 +329,49 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     # --- Extract species-specific Biso values ---
     #
     # Only treat pure element keys as species-level Biso:
-    #   biso_Li -> Li
-    #   biso_Ge -> Ge
+    #   biso_C
+    #   biso_N
+    #   biso_Co
     #
     # Do NOT treat site keys as species-level Biso:
-    #   biso_li1
-    #   biso_ge1
-    #   biso_s2
+    #   biso_c3
+    #   biso_n55
+    #   biso_co49
     #
     # Site Biso parameters remain in initial/refinable dictionaries and are
-    # handled directly by PDFCalculator.
+    # handled directly by PDFCalculator when site-Biso mode is used.
     biso_by_species: Dict[str, float] = {}
-
+    
     for k, v in initial.items():
         kl = str(k).strip().lower()
-
+    
         if not kl.startswith("biso_"):
             continue
-
+        
         raw_species = str(k)[len("biso_"):].strip()
-
+    
+        if not raw_species:
+            continue
+        
         try:
             species = clean_element_name(raw_species)
         except Exception:
             continue
-
+        
         # Only accept exact element-symbol keys.
-        # Examples accepted:
-        #   biso_Li
-        #   biso_li
+        #
+        # Accepted:
+        #   biso_C
+        #   biso_N
+        #   biso_Co
+        #
         # Rejected:
-        #   biso_li1
-        #   biso_ge1
+        #   biso_c3
+        #   biso_n55
+        #   biso_co49
         if raw_species.lower() != species.lower():
             continue
-
+        
         try:
             biso_by_species[species] = float(v)
         except Exception:
@@ -544,68 +448,39 @@ def read_input_file(filename: str) -> Dict[str, Any]:
             except Exception:
                 refinement_cfg[key] = raw
 
-    # --- Handle lambda parameters ---
-    # Extract lambda parameters from the input file
-    lambda_params = {}
-    for k, v in initial.items():
-        if str(k).lower().startswith("lambda_"):
-            # Handle both formats: lambda_Fe-Fe_0 and lambda_0
-            if "-" in k:
-                # Format: lambda_A-B_k
-                try:
-                    # Extract A, B, k from the key
-                    parts = k.split("_")
-                    if len(parts) >= 3:
-                        a = parts[1]
-                        b = parts[2]
-                        k_val = int(parts[3])
-                        pair_key = f"{a}-{b}"
-                        lambda_params[pair_key] = lambda_params.get(pair_key, {})
-                        lambda_params[pair_key][k_val] = float(v)
-                except Exception:
-                    pass
-            else:
-                # Format: lambda_k
-                try:
-                    k_val = int(k.split("_")[1])
-                    lambda_params[f"global_{k_val}"] = float(v)
-                except Exception:
-                    pass
 
-    
-
+        # --- Crystallite shape settings ---
     crystallite_shape: Dict[str, Any] = {}
 
     if "crystallite_shape" in config_raw:
         for k, v in config_raw["crystallite_shape"].items():
             key = str(k).strip()
             raw = "" if v is None else str(v).strip()
-    
+
             if not key or raw == "":
                 continue
-            
+
             low = raw.lower()
-    
+
             if low in ("true", "false", "yes", "no", "y", "n", "on", "off", "1", "0"):
                 crystallite_shape[key] = low in ("true", "yes", "y", "on", "1")
                 continue
-            
+
             try:
                 if re.fullmatch(r"[+-]?\d+", raw):
                     crystallite_shape[key] = int(raw)
                     continue
             except Exception:
                 pass
-            
+
             try:
                 crystallite_shape[key] = float(raw)
                 continue
             except Exception:
                 crystallite_shape[key] = raw
 
-    # --- Add lambda parameters to the config ---
-    # This ensures they're properly handled by the GUI
-    config = {
+
+    return {
         "structure_file": structure_file,
         "gr_data_file": gr_data_file,
         "r_min": r_min,
@@ -618,9 +493,5 @@ def read_input_file(filename: str) -> Dict[str, Any]:
         "contrast_factors": contrast_factors,
         "constraints": constraints,
         "biso_by_species": biso_by_species,
-        "lambda_params": lambda_params,  # Add lambda parameters to config
         "crystallite_shape": crystallite_shape,
     }
-
-
-    return config
