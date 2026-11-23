@@ -222,7 +222,9 @@ class FitWorker(QtCore.QThread):
             self.status.emit("Initializing PDF model…")
             pdf_model = PDFCalculator(
                 config,
-                config["structure_file"],
+                config[
+                    "structure_file"
+                ],
                 r_exp,
                 pair_cutoff=pair_cutoff,
             )

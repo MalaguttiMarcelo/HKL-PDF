@@ -63,15 +63,43 @@ Try:
 - disabling competing broadening models;
 - checking the initial structure.
 
-## Site coordinates do not change the PDF
-
-The packed shell backend does not currently regenerate pair vectors from
-refined `x_*`, `y_*`, `z_*`, or `occ_*` parameters.
-
 ## Site Biso parameters behave similarly
 
 Site-labelled Biso values are currently averaged by element. Prefer
-element-level Biso until fully site-specific shell broadening is implemented.
+element-level Biso, or use [anisotropic ADPs](adp.md) for site-specific
+displacements.
+
+## A refined coordinate does not move
+
+Coordinates fixed by the site symmetry cannot be refined. Only the free
+coordinates are refined; tied coordinates follow them. Check also the
+**Max coordinate shift** limit on the **Atoms & occupancy** page.
+
+## The GPU is not used
+
+- Check that `shell_backend` or `pdf_backend` is set to `cuda`.
+- Check that CuPy imports: `python -c "import cupy"`.
+- Read the console: HKL-PDF prints why it falls back to the CPU.
+- Peak widths with anisotropic ADPs are always calculated on the CPU.
+
+See [GPU acceleration](gpu.md).
+
+## A stacking model takes long to start
+
+The first compilation of a stochastic stacking ensemble can take about
+20 seconds. It is cached for the session and on disk; later runs with the
+same stacking setup start in a few seconds.
+
+## Esds look too small
+
+PDF points are correlated. Turn on **Correct esds for correlated PDF
+points** in the refinement settings. See [Esds](uncertainties.md).
+
+## A project opened on another computer cannot find its files
+
+Use relative paths for the data and CIF files, and keep them next to the
+project file. Relative paths in `.inp` and `.json` files are read relative to
+the file's own folder.
 
 ## Finite-shape calculations are slow
 

@@ -29,8 +29,6 @@ git clone https://github.com/MalaguttiMarcelo/HKL-PDF.git
 cd HKL-PDF
 ```
 
-Replace the repository URL if you publish the project under a different
-GitHub account or repository name.
 
 ## Create a virtual environment
 
@@ -73,14 +71,24 @@ If the visualization packages were not installed automatically, run:
 python -m pip install pyvista pyvistaqt vtk qtpy
 ```
 
+## Optional: NVIDIA GPU support
+
+GPU calculations need CuPy built for your CUDA version, for example:
+
+```bash
+python -m pip install cupy-cuda12x
+```
+
+See [GPU acceleration](gpu.md).
+
 ## Start the GUI
 
 ```bash
 python -m pdf_fitting.gui
 ```
 
-The project may also provide a launcher or installed command, depending on
-the package configuration.
+After `pip install`, the `hkl-pdf` command starts the same window. Add
+`--classic` to open the single-phase window.
 
 ## First calculation
 
@@ -113,6 +121,7 @@ Important cache subdirectories include:
 ```text
 shell_cache
 finite_shape_cache
+cache/stochastic_topology
 ```
 
 ## Verify the installation

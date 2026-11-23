@@ -1,0 +1,147 @@
+[files]
+structure_file = Fe_bcc_300K.cif
+gr_data_file = FeCr_ID31.xy
+
+[range]
+r_min = 2.0
+r_max = 150.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+microstrain_model = wilkens
+saxs_enabled = false
+saxs_model = sphere
+saxs_apply_qdamp = false
+saxs_apply_qmax = true
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = false
+compute_local_trends_on_finish = false
+export_finite_coordination = false
+shell_backend = cpu
+pdf_backend = cpu
+gpu_device = 0
+gpu_memory_fraction = 0.7
+
+[initial_values]
+scale = 0.2963721412246571
+a = 2.868182688293096
+b = 2.868182688293096
+c = 2.868182688293096
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+qdamp = 0.011485099495637478
+delta_broad = 0.0014090180673610453
+qmax = 20.0
+qmax_zeros = 5.0
+biso_fe = 0.30514135191411
+x_fe1 = 0.0
+y_fe1 = 0.0
+z_fe1 = 0.0
+occ_fe1 = 1.0
+biso_Fe = 0.3
+occ_pd1 = 1.0
+x_pd1 = 0.0
+y_pd1 = 0.0
+z_pd1 = 0.0
+rho = 0.00022110306670435864
+re = 89.89171437020845
+fe = 0.4826231052046825
+CEdgeA = 0.26528
+CEdgeB = -0.35595
+CScrewA = 0.307288
+CScrewB = -0.819979
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+biso_fe = true
+x_fe1 = false
+y_fe1 = false
+z_fe1 = false
+occ_fe1 = false
+biso_Fe = false
+occ_pd1 = false
+x_pd1 = false
+y_pd1 = false
+z_pd1 = false
+rho = true
+re = false
+fe = true
+CEdgeA = false
+CEdgeB = false
+CScrewA = false
+CScrewB = false
+
+[bounds]
+biso_Fe = 0.0, 10.0
+fe = 0.0, 1.0
+
+[crystallite_shape]
+mode = finite_shape
+a_max = 18
+a_min = -19
+axis_h = false
+axis_k = false
+axis_l = true
+b_max = 18
+b_min = -19
+base1_h = true
+base1_k = false
+base1_l = false
+base2_h = false
+base2_k = true
+base2_l = false
+c_max = 5
+c_min = -6
+construction_mode = block_then_mask
+diameter_cells = 34.86
+height_cells = 9.0
+search_mode = predefined
+shape_type = disk
+show_cell_boxes = false
+show_cell_centers = true
+show_unit_cell_atoms = true
+all_atom_preview_limit = 100000
+apply_shape_preview = true
+shape_opacity = 0.13
+show_all_atoms = true
+show_shape_axes = true
+show_shape_surface = true
+clip_preview_atoms_to_shape = true
+diameter_angstrom = 100.0
+diameter_max_cells = 150.0
+diameter_min_cells = 50.0
+fill_shape_with_cells = true
+height_angstrom = 25.818
+height_max_cells = 10.0
+height_min_cells = 1.0
+n_scan_candidates = true
+scan_diameter = false
+scan_height = false
+step_cells = 1.0
+diameter_infinite = false
+axis1_cells = 34.86
+axis2_cells = 34.86
+axis3_cells = 9.0
+
+[constraints]
+

@@ -574,3 +574,524 @@ def unique_int3_cuda(
             copy=False,
         ),
     )
+
+def group_dynamic_stacked_descriptors_cuda(
+    *,
+    source_alpha: np.ndarray,
+    source_beta: np.ndarray,
+    delta_fractional_0: np.ndarray,
+    delta_fractional_1: np.ndarray,
+    delta_fractional_2: np.ndarray,
+    delta_a: np.ndarray,
+    delta_b: np.ndarray,
+    delta_s: np.ndarray,
+    delta_normal: np.ndarray,
+    device_id: int = 0,
+    memory_fraction: float = 0.70,
+) -> Dict[str, np.ndarray]:
+    """
+    Group dynamic-stacked pair descriptors on CUDA.
+
+    The dynamic descriptor key is:
+
+        source_alpha
+        source_beta
+        delta_fractional_0
+        delta_fractional_1
+        delta_fractional_2
+        delta_a
+        delta_b
+        delta_s
+        delta_normal
+
+    All delta values are already quantized integer fields when this function
+    is called.
+
+    Returns unique descriptors and their raw multiplicities. Only the reduced
+    unique rows are copied back to the CPU.
+    """
+    cp = get_cupy()
+
+    select_device(
+        device_id
+    )
+
+    source_alpha = np.ascontiguousarray(
+        source_alpha,
+        dtype=np.int32,
+    )
+
+    source_beta = np.ascontiguousarray(
+        source_beta,
+        dtype=np.int32,
+    )
+
+    delta_fractional_0 = np.ascontiguousarray(
+        delta_fractional_0,
+        dtype=np.int64,
+    )
+
+    delta_fractional_1 = np.ascontiguousarray(
+        delta_fractional_1,
+        dtype=np.int64,
+    )
+
+    delta_fractional_2 = np.ascontiguousarray(
+        delta_fractional_2,
+        dtype=np.int64,
+    )
+
+    delta_a = np.ascontiguousarray(
+        delta_a,
+        dtype=np.int64,
+    )
+
+    delta_b = np.ascontiguousarray(
+        delta_b,
+        dtype=np.int64,
+    )
+
+    delta_s = np.ascontiguousarray(
+        delta_s,
+        dtype=np.int64,
+    )
+
+    delta_normal = np.ascontiguousarray(
+        delta_normal,
+        dtype=np.int64,
+    )
+
+    row_count = int(
+        source_alpha.size
+    )
+
+    if row_count <= 0:
+        return {
+            "source_alpha": np.zeros(
+                0,
+                dtype=np.int32,
+            ),
+            "source_beta": np.zeros(
+                0,
+                dtype=np.int32,
+            ),
+            "delta_fractional_0": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_fractional_1": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_fractional_2": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_a": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_b": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_s": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "delta_normal": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+            "counts": np.zeros(
+                0,
+                dtype=np.int64,
+            ),
+        }
+
+    input_arrays = (
+        source_beta,
+        delta_fractional_0,
+        delta_fractional_1,
+        delta_fractional_2,
+        delta_a,
+        delta_b,
+        delta_s,
+        delta_normal,
+    )
+
+    if any(
+        array.size != row_count
+        for array in input_arrays
+    ):
+        raise ValueError(
+            "All dynamic stacked descriptor arrays must have "
+            "the same length."
+        )
+
+    # Conservative estimate for:
+    #
+    # - source/delta host-to-device arrays;
+    # - stacked CuPy lexsort key matrix;
+    # - sorted descriptor arrays;
+    # - sort order;
+    # - group-boundary arrays;
+    # - CuPy sorting workspace.
+    #
+    # This is intentionally larger than the explicit array sizes.
+    estimated_bytes = int(
+        row_count
+        * 430
+    )
+
+    _check_gpu_memory(
+        estimated_bytes,
+        device_id=device_id,
+        memory_fraction=memory_fraction,
+    )
+
+    with cp.cuda.Device(
+        int(
+            device_id
+        )
+    ):
+        d_source_alpha = cp.asarray(
+            source_alpha,
+            dtype=cp.int32,
+        )
+
+        d_source_beta = cp.asarray(
+            source_beta,
+            dtype=cp.int32,
+        )
+
+        # Pack two non-negative int32 source-site identifiers into one int64.
+        #
+        # source_code = alpha << 32 | beta
+        #
+        # This reduces the number of lexsort fields from nine to eight.
+        d_source_code = (
+            (
+                d_source_alpha.astype(
+                    cp.int64
+                )
+                << cp.int64(
+                    32
+                )
+            )
+            | (
+                d_source_beta.astype(
+                    cp.int64
+                )
+                & cp.int64(
+                    0xFFFFFFFF
+                )
+            )
+        )
+
+        d_df0 = cp.asarray(
+            delta_fractional_0,
+            dtype=cp.int64,
+        )
+
+        d_df1 = cp.asarray(
+            delta_fractional_1,
+            dtype=cp.int64,
+        )
+
+        d_df2 = cp.asarray(
+            delta_fractional_2,
+            dtype=cp.int64,
+        )
+
+        d_da = cp.asarray(
+            delta_a,
+            dtype=cp.int64,
+        )
+
+        d_db = cp.asarray(
+            delta_b,
+            dtype=cp.int64,
+        )
+
+        d_ds = cp.asarray(
+            delta_s,
+            dtype=cp.int64,
+        )
+
+        d_dn = cp.asarray(
+            delta_normal,
+            dtype=cp.int64,
+        )
+
+        # CuPy lexsort uses the LAST row as primary key.
+        #
+        # Requested logical order:
+        #
+        # source_code
+        # df0
+        # df1
+        # df2
+        # da
+        # db
+        # ds
+        # dn
+        #
+        # Therefore keys are supplied in reverse order.
+        sort_keys = cp.stack(
+            (
+                d_dn,
+                d_ds,
+                d_db,
+                d_da,
+                d_df2,
+                d_df1,
+                d_df0,
+                d_source_code,
+            ),
+            axis=0,
+        )
+
+        sort_order = cp.lexsort(
+            sort_keys
+        )
+
+        source_sorted = d_source_code[
+            sort_order
+        ]
+
+        df0_sorted = d_df0[
+            sort_order
+        ]
+
+        df1_sorted = d_df1[
+            sort_order
+        ]
+
+        df2_sorted = d_df2[
+            sort_order
+        ]
+
+        da_sorted = d_da[
+            sort_order
+        ]
+
+        db_sorted = d_db[
+            sort_order
+        ]
+
+        ds_sorted = d_ds[
+            sort_order
+        ]
+
+        dn_sorted = d_dn[
+            sort_order
+        ]
+
+        new_group = cp.empty(
+            row_count,
+            dtype=cp.bool_,
+        )
+
+        new_group[
+            0
+        ] = True
+
+        if row_count > 1:
+            new_group[
+                1:
+            ] = (
+                (
+                    source_sorted[
+                        1:
+                    ]
+                    != source_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    df0_sorted[
+                        1:
+                    ]
+                    != df0_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    df1_sorted[
+                        1:
+                    ]
+                    != df1_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    df2_sorted[
+                        1:
+                    ]
+                    != df2_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    da_sorted[
+                        1:
+                    ]
+                    != da_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    db_sorted[
+                        1:
+                    ]
+                    != db_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    ds_sorted[
+                        1:
+                    ]
+                    != ds_sorted[
+                        :-1
+                    ]
+                )
+                | (
+                    dn_sorted[
+                        1:
+                    ]
+                    != dn_sorted[
+                        :-1
+                    ]
+                )
+            )
+
+        first_positions = cp.flatnonzero(
+            new_group
+        ).astype(
+            cp.int64,
+            copy=False,
+        )
+
+        group_count = int(
+            first_positions.size
+        )
+
+        end_positions = cp.empty(
+            group_count,
+            dtype=cp.int64,
+        )
+
+        if group_count > 1:
+            end_positions[
+                :-1
+            ] = first_positions[
+                1:
+            ]
+
+        end_positions[
+            -1
+        ] = row_count
+
+        counts = (
+            end_positions
+            - first_positions
+        ).astype(
+            cp.int64,
+            copy=False,
+        )
+
+        source_code_host = cp.asnumpy(
+            source_sorted[
+                first_positions
+            ]
+        )
+
+        result = {
+            "source_alpha": (
+                source_code_host
+                >> np.int64(
+                    32
+                )
+            ).astype(
+                np.int32,
+                copy=False,
+            ),
+            "source_beta": (
+                source_code_host
+                & np.int64(
+                    0xFFFFFFFF
+                )
+            ).astype(
+                np.int32,
+                copy=False,
+            ),
+            "delta_fractional_0": cp.asnumpy(
+                df0_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_fractional_1": cp.asnumpy(
+                df1_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_fractional_2": cp.asnumpy(
+                df2_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_a": cp.asnumpy(
+                da_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_b": cp.asnumpy(
+                db_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_s": cp.asnumpy(
+                ds_sorted[
+                    first_positions
+                ]
+            ),
+            "delta_normal": cp.asnumpy(
+                dn_sorted[
+                    first_positions
+                ]
+            ),
+            "counts": cp.asnumpy(
+                counts
+            ),
+        }
+
+        del d_source_alpha
+        del d_source_beta
+        del d_source_code
+        del d_df0
+        del d_df1
+        del d_df2
+        del d_da
+        del d_db
+        del d_ds
+        del d_dn
+        del sort_keys
+        del sort_order
+        del source_sorted
+        del df0_sorted
+        del df1_sorted
+        del df2_sorted
+        del da_sorted
+        del db_sorted
+        del ds_sorted
+        del dn_sorted
+        del new_group
+        del first_positions
+        del end_positions
+        del counts
+
+        cp.get_default_memory_pool().free_all_blocks()
+
+    return result

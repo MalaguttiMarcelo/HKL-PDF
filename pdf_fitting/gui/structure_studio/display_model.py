@@ -15,6 +15,87 @@ from .chemistry import (
 )
 
 
+def site_species_components(site) -> List[Dict[str, Any]]:
+    """
+    Return a list of chemical components and occupancies for a pymatgen site.
+
+    Ordered site:
+        [{"element": "Zr", "occupancy": 1.0}]
+
+    Partial site:
+        [{"element": "N", "occupancy": 0.575}]
+
+    Antisite / mixed site:
+        [
+            {"element": "Fe", "occupancy": 0.70},
+            {"element": "Co", "occupancy": 0.30},
+        ]
+    """
+    components: List[Dict[str, Any]] = []
+
+    try:
+        for specie, occupancy in site.species.items():
+            element = clean_element_symbol(
+                getattr(
+                    specie,
+                    "symbol",
+                    str(specie),
+                )
+            )
+
+            components.append(
+                {
+                    "element": element,
+                    "occupancy": max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(occupancy),
+                        ),
+                    ),
+                }
+            )
+
+    except Exception:
+        pass
+
+    if not components:
+        components.append(
+            {
+                "element": "X",
+                "occupancy": 1.0,
+            }
+        )
+
+    return components
+
+
+def primary_site_element(site) -> str:
+    """
+    Return the element having the largest occupancy on this site.
+
+    This is used for atom labels and bond-radius calculations.
+    """
+    components = site_species_components(site)
+
+    component = max(
+        components,
+        key=lambda item: float(
+            item.get(
+                "occupancy",
+                0.0,
+            )
+        ),
+    )
+
+    return str(
+        component.get(
+            "element",
+            "X",
+        )
+    )
+
+
 StyleResolver = Callable[[int], Dict[str, Any]]
 
 
@@ -60,9 +141,14 @@ def build_supercell_structure(
         )
     )
 
+    source_species = [
+        site.species
+        for site in structure.sites
+    ]
+
     source = Structure(
         structure.lattice,
-        structure.species,
+        source_species,
         structure.frac_coords,
         site_properties=site_properties,
         coords_are_cartesian=False,
@@ -144,10 +230,12 @@ def make_display_atom_record(
         or {}
     )
 
-    symbol = clean_element_symbol(
-        str(
-            original_site.specie
-        )
+    symbol = primary_site_element(
+        original_site
+    )
+
+    occupancy_components = site_species_components(
+        original_site
     )
 
     image_array = np.asarray(
@@ -198,6 +286,7 @@ def make_display_atom_record(
         "element": str(
             symbol
         ),
+        "occupancy_components": occupancy_components,
         "species": str(
             display_site.species_string
         ),
@@ -385,9 +474,7 @@ def detect_display_bonds(
     bonds are added to atom_records.
     """
     symbols = [
-        clean_element_symbol(
-            str(site.specie)
-        )
+        primary_site_element(site)
         for site in display_structure.sites
     ]
 
@@ -556,16 +643,12 @@ def detect_display_bonds(
         ):
             continue
 
-        center_element = clean_element_symbol(
-            str(
-                center_site.specie
-            )
+        center_element = primary_site_element(
+            center_site
         )
 
-        neighbor_element = clean_element_symbol(
-            str(
-                neighbor_site.specie
-            )
+        neighbor_element = primary_site_element(
+            neighbor_site
         )
 
         if maximum_distance is None:
@@ -721,6 +804,99 @@ def detect_display_bonds(
     return bonds
 
 
+def bonds_between_displayed_atoms(
+    *,
+    atom_records: List[Dict[str, Any]],
+    style_resolver: StyleResolver,
+    tolerance_scale: float,
+    minimum_distance: float,
+    maximum_distance: Optional[float],
+    bond_radius: float,
+    bond_opacity: float,
+    two_color: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Bonds only between atoms that are already displayed (unit cell(s) plus
+    boundary images). No atoms are added, so the display stays inside the
+    cell box (VESTA-like). Uses a k-d tree on Cartesian positions.
+    """
+    from scipy.spatial import cKDTree
+
+    records = [r for r in atom_records if bool(r.get("visible", True))]
+
+    if len(records) < 2:
+        return []
+
+    positions = np.asarray([r["position"] for r in records], dtype=float)
+    elements = [str(r.get("element") or r.get("symbol") or "") for r in records]
+
+    if maximum_distance is None:
+        search_radius = (
+            2.0 * max((covalent_radius(e) for e in elements), default=1.5)
+            * float(tolerance_scale)
+            + 0.25
+        )
+    else:
+        search_radius = float(maximum_distance)
+
+    tree = cKDTree(positions)
+    pairs = tree.query_pairs(r=float(search_radius), output_type="ndarray")
+
+    bonds: List[Dict[str, Any]] = []
+
+    for i, j in pairs:
+        a, b = records[int(i)], records[int(j)]
+        start = positions[int(i)]
+        end = positions[int(j)]
+        distance = float(np.linalg.norm(end - start))
+
+        if distance < float(minimum_distance):
+            continue
+
+        ea, eb = elements[int(i)], elements[int(j)]
+
+        if maximum_distance is None:
+            pair_maximum = float(tolerance_scale) * (covalent_radius(ea) + covalent_radius(eb))
+        else:
+            pair_maximum = float(maximum_distance)
+
+        if distance > pair_maximum:
+            continue
+
+        style_a = style_resolver(int(a["base_site_index"]))
+        style_b = style_resolver(int(b["base_site_index"]))
+        key = tuple(sorted((tuple(a["key"]), tuple(b["key"]))))
+        image = tuple(int(x) for x in np.asarray(b["key"][1:]) - np.asarray(a["key"][1:]))
+
+        bonds.append(
+            {
+                "key": key,
+                "center_key": a["key"],
+                "neighbor_key": b["key"],
+                "center_display_index": int(a["display_site_index"]),
+                "neighbor_display_index": int(b["display_site_index"]),
+                "center_base_index": int(a["base_site_index"]),
+                "neighbor_base_index": int(b["base_site_index"]),
+                "center_element": ea,
+                "neighbor_element": eb,
+                "center_label": a.get("label", ""),
+                "neighbor_label": b.get("label", ""),
+                "start": start,
+                "midpoint": 0.5 * (start + end),
+                "end": end,
+                "distance": distance,
+                "image": image,
+                "color_center": str(style_a.get("color", element_color(ea))),
+                "color_neighbor": str(style_b.get("color", element_color(eb))),
+                "radius": float(bond_radius),
+                "opacity": float(bond_opacity),
+                "two_color": bool(two_color),
+            }
+        )
+
+    return bonds
+
+
 def build_display_model(
     *,
     original_structure: Structure,
@@ -734,9 +910,14 @@ def build_display_model(
     bond_radius: float,
     bond_opacity: float,
     two_color: bool,
+    add_bonded_outside: bool = False,
 ) -> Dict[str, Any]:
     """
     Build the supercell atoms and periodic bonds used by the viewer.
+
+    add_bonded_outside: add the bonded neighbours that lie outside the
+    displayed cell(s) (molecule completion). Off by default: bonds are drawn
+    only between displayed atoms, so the view stays inside the cell box.
     """
     display_structure = build_supercell_structure(
         original_structure,
@@ -750,7 +931,18 @@ def build_display_model(
         include_boundary_images=include_boundary_images,
     )
 
-    if bonds_enabled:
+    if bonds_enabled and not add_bonded_outside:
+        bond_records = bonds_between_displayed_atoms(
+            atom_records=atom_records,
+            style_resolver=style_resolver,
+            tolerance_scale=tolerance_scale,
+            minimum_distance=minimum_distance,
+            maximum_distance=maximum_distance,
+            bond_radius=bond_radius,
+            bond_opacity=bond_opacity,
+            two_color=two_color,
+        )
+    elif bonds_enabled:
         bond_records = detect_display_bonds(
             display_structure=display_structure,
             original_structure=original_structure,

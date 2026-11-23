@@ -1,22 +1,134 @@
 from __future__ import annotations
 
+import json
 import os
 import re
-import time
 import tempfile
-import itertools
-from typing import Optional, Dict, Any, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
-
-
 
 from pdf_fitting.io_handler import read_input_file
 
 from .defaults import DEFAULT_PARAMS
-from .param_widgets import ParamTableWidget, DynParamTableWidget, LambdaListWidget, SiteParamTableWidget
+from .param_widgets import (
+    DynParamTableWidget,
+    LambdaListWidget,
+    ParamTableWidget,
+    SiteParamTableWidget,
+)
+
+from .timing import (
+    timed,
+    timed_block,
+    profiled,
+)
+
+STACKING_VECTOR_PARAMETERS = (
+    "stack_u_ab",
+    "stack_v_ab",
+    "stack_u_repeat",
+    "stack_v_repeat",
+    "stack_delta_h",
+)
+
+STACKING_VECTOR_DEFAULT_BOUNDS = {
+    "stack_u_ab": (
+        -0.5,
+        0.5,
+    ),
+    "stack_v_ab": (
+        -0.5,
+        0.5,
+    ),
+    "stack_u_repeat": (
+        -0.5,
+        0.5,
+    ),
+    "stack_v_repeat": (
+        -0.5,
+        0.5,
+    ),
+    "stack_delta_h": (
+        -2.0,
+        2.0,
+    ),
+}
+
+def merge_stacking_refinement_state(
+    stacking_refinement,
+    fallback_refinement=None,
+):
+    """
+    Preserve the real transition-based stacking refinement state.
+
+    The valid format is:
+
+    {
+        "treatment": "fixed" | "continuous" | "grid",
+        "transitions": [
+            {
+                "transition_id": "...",
+                "label": "...",
+                "u": {"enabled": bool, "minimum": float, "maximum": float, "step": float},
+                "v": {"enabled": bool, "minimum": float, "maximum": float, "step": float},
+                "h": {"enabled": bool, "minimum": float, "maximum": float, "step": float},
+            },
+        ],
+    }
+
+    Never replace this state with obsolete vector-refinement settings.
+    """
+    current = dict(stacking_refinement or {})
+    fallback = dict(fallback_refinement or {})
+
+    current_transitions = current.get("transitions", [])
+
+    if not isinstance(current_transitions, list):
+        current_transitions = []
+
+    if not current_transitions:
+        fallback_transitions = fallback.get("transitions", [])
+
+        if isinstance(fallback_transitions, list):
+            current_transitions = fallback_transitions
+
+    treatment = str(
+        current.get(
+            "treatment",
+            fallback.get("treatment", "fixed"),
+        )
+        or "fixed"
+    ).strip().lower()
+
+    if treatment not in ("fixed", "continuous", "grid"):
+        treatment = "fixed"
+
+    stochastic_vectors = current.get(
+        "stochastic_vectors",
+        fallback.get(
+            "stochastic_vectors",
+            {},
+        ),
+    )
+
+    if not isinstance(
+        stochastic_vectors,
+        dict,
+    ):
+        stochastic_vectors = {}
+
+    return {
+        "treatment": treatment,
+        "transitions": current_transitions,
+        "stochastic_vectors": dict(
+            stochastic_vectors
+        ),
+    }
 
 def clean_el_symbol(name: Any) -> str:
     s = str(name).strip()
@@ -76,6 +188,8 @@ class InputBuilder(QtWidgets.QWidget):
         self._loaded_structure_path = ""
         self._loaded_structure_mtime = None
 
+        self._stacking_vector_refinement_spec: Dict[str, Any] = {}
+
         self._site_table_max_rows = int(
             os.environ.get(
                 "PDF_FITTING_SITE_TABLE_MAX_ROWS",
@@ -96,6 +210,9 @@ class InputBuilder(QtWidgets.QWidget):
         self._site_biso_keys: set[str] = set()
         self._site_use_flags: Dict[str, bool] = {}
         self._crystallite_shape_spec: Dict[str, Any] = {}
+        self._layer_stacking_spec: Dict[str, Any] = {}
+        self._stacking_search_spec: Dict[str, Any] = {}
+        self._stacking_refinement_spec: Dict[str, Any] = {}
         self._loaded_cf_initial: Dict[str, Any] = {}
         self._loaded_cf_refinable: Dict[str, bool] = {}
         self._loaded_cf_bounds: Dict[str, Any] = {}
@@ -812,6 +929,84 @@ class InputBuilder(QtWidgets.QWidget):
         v_site_panel.addLayout(row_sites_header)
         v_site_panel.addWidget(self.tbl_sites, 1)
 
+        # Element-wise refinement of occupancies and fractional coordinates.
+        # Written to the input as [refinement] refine_occ_species /
+        # refine_xyz_species and expanded to per-site parameters by the fit
+        # engine, so it also works when the structure is too large for the
+        # site table. The element checkboxes mirror the Rocc / Rx-Ry-Rz
+        # columns of the site table.
+        self._species_refine: Dict[str, Dict[str, Any]] = {}
+
+        self.gb_occ_species, v_occ_species = self._make_species_refine_box(
+            "occ",
+            "Refine occupancy by element",
+            "Refine the occupancy of every site of the checked elements "
+            "(one occupancy per CIF site label).\n"
+            "Saved as [refinement] refine_occ_species.",
+        )
+
+        # Global occupancy limits ([refinement] occ_min / occ_max). Per-site
+        # Occ Min / Occ Max in the site table override them.
+        row_occ_limits = QtWidgets.QHBoxLayout()
+
+        self.spin_occ_min = QtWidgets.QDoubleSpinBox()
+        self.spin_occ_max = QtWidgets.QDoubleSpinBox()
+
+        for spin, value in (
+            (self.spin_occ_min, 0.0),
+            (self.spin_occ_max, 1.0),
+        ):
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.05)
+            spin.setValue(value)
+            spin.setToolTip(
+                "Global occupancy limits for every refined occupancy. "
+                "Per-site Occ Min / Occ Max in the site table override them."
+            )
+
+        row_occ_limits.addWidget(QtWidgets.QLabel("Occupancy limits: min"))
+        row_occ_limits.addWidget(self.spin_occ_min)
+        row_occ_limits.addWidget(QtWidgets.QLabel("max"))
+        row_occ_limits.addWidget(self.spin_occ_max)
+        row_occ_limits.addStretch(1)
+
+        v_occ_species.addLayout(row_occ_limits)
+
+        v_site_panel.addWidget(self.gb_occ_species)
+
+        self.gb_xyz_species, v_xyz_species = self._make_species_refine_box(
+            "xyz",
+            "Refine fractional coordinates by element",
+            "Refine x/y/z of every site of the checked elements. "
+            "Coordinates fixed by site symmetry are skipped and tied ones "
+            "(e.g. x,x,x) are refined as one parameter.\n"
+            "Saved as [refinement] refine_xyz_species.",
+        )
+
+        # Maximum shift from the CIF position ([refinement] xyz_max_shift).
+        row_xyz_limits = QtWidgets.QHBoxLayout()
+
+        self.spin_xyz_max_shift = QtWidgets.QDoubleSpinBox()
+        self.spin_xyz_max_shift.setRange(0.0, 5.0)
+        self.spin_xyz_max_shift.setDecimals(3)
+        self.spin_xyz_max_shift.setSingleStep(0.05)
+        self.spin_xyz_max_shift.setValue(0.3)
+        self.spin_xyz_max_shift.setSuffix(" \u00c5")
+        self.spin_xyz_max_shift.setToolTip(
+            "Largest shift of a refined coordinate from its CIF value, "
+            "converted to fractional units along each axis. 0 = no limit. "
+            "Per-site [bounds] x_/y_/z_<site> override it."
+        )
+
+        row_xyz_limits.addWidget(QtWidgets.QLabel("Max shift from CIF:"))
+        row_xyz_limits.addWidget(self.spin_xyz_max_shift)
+        row_xyz_limits.addStretch(1)
+
+        v_xyz_species.addLayout(row_xyz_limits)
+
+        v_site_panel.addWidget(self.gb_xyz_species)
+
         # Element-grouped Biso controls below site table.
         gb_elem_biso = QtWidgets.QGroupBox("Element-grouped Biso parameters")
         v_elem_biso = QtWidgets.QVBoxLayout(gb_elem_biso)
@@ -1070,6 +1265,9 @@ class InputBuilder(QtWidgets.QWidget):
         self.chk_biso_by_element.toggled.connect(self._on_biso_mode_changed)
         self.chk_biso_by_element.toggled.connect(lambda _=None: self._emit_changed_if_not_blocked())
         self.btn_site_params_window.clicked.connect(self.open_site_parameters_dialog)
+        self.tbl_sites.refineFlagToggled.connect(self._on_site_refine_flag_toggled)
+        for _spin in (self.spin_occ_min, self.spin_occ_max, self.spin_xyz_max_shift):
+            _spin.valueChanged.connect(lambda _=None: self._emit_changed_if_not_blocked())
         self.btn_pair_dynamics_window.clicked.connect(self.open_pair_dynamics_dialog)
         self.lambda_list.changed.connect(self._emit_changed_if_not_blocked)
         self.tbl_cf_edge.changed.connect(self._emit_changed_if_not_blocked)
@@ -1167,41 +1365,235 @@ class InputBuilder(QtWidgets.QWidget):
 
 
     def _update_shape_summary_label(self) -> None:
-        spec = getattr(self, "_crystallite_shape_spec", {}) or {}
+        shape_spec = dict(
+            getattr(
+                self,
+                "_crystallite_shape_spec",
+                {},
+            )
+            or {}
+        )
 
-        if not spec:
-            self.lbl_shape_summary.setText("No finite crystallite shape defined.")
+        if not shape_spec:
+            self.lbl_shape_summary.setText(
+                "No finite crystallite shape defined."
+            )
             return
 
-        search_mode = str(spec.get("search_mode", "grid_search")).strip().lower()
+        stacking_spec = dict(
+            getattr(
+                self,
+                "_layer_stacking_spec",
+                {},
+            )
+            or {}
+        )
 
-        if search_mode == "predefined":
-            txt = (
-                f"Mode: pre-defined crystallite dimensions\n"
-                f"Shape: {spec.get('shape_type', 'unknown')}\n"
-                f"Diameter: {spec.get('diameter_cells', '?')} cells\n"
-                f"Height: {spec.get('height_cells', '?')} cells\n"
-                f"Axis: [{spec.get('axis_h', 0)} "
-                f"{spec.get('axis_k', 0)} "
-                f"{spec.get('axis_l', 1)}]"
+        stacking_search = dict(
+            getattr(
+                self,
+                "_stacking_search_spec",
+                {},
+            )
+            or {}
+        )
+
+        search_mode = str(
+            shape_spec.get(
+                "search_mode",
+                "predefined",
+            )
+        ).strip().lower()
+
+        shape_type = str(
+            shape_spec.get(
+                "shape_type",
+                "unknown",
+            )
+        )
+
+        axis1_cells = shape_spec.get(
+            "axis1_cells",
+            shape_spec.get(
+                "diameter_cells",
+                "?",
+            ),
+        )
+
+        axis2_cells = shape_spec.get(
+            "axis2_cells",
+            axis1_cells,
+        )
+
+        axis3_cells = shape_spec.get(
+            "axis3_cells",
+            shape_spec.get(
+                "height_cells",
+                "?",
+            ),
+        )
+
+        lines = [
+            f"Shape: {shape_type}",
+            f"Base axis 1: {axis1_cells} cells",
+            f"Base axis 2: {axis2_cells} cells",
+        ]
+
+        stacking_enabled = bool(
+            stacking_spec.get(
+                "enabled",
+                False,
+            )
+        )
+
+        if stacking_enabled:
+            sequence = stacking_spec.get(
+                "sequence",
+                [],
+            )
+
+            if not isinstance(
+                sequence,
+                list,
+            ):
+                sequence = []
+
+            lines.append(
+                f"Complete layers: {axis3_cells}"
+            )
+
+            spacing_mode = str(
+                stacking_spec.get(
+                    "spacing_mode",
+                    "independent",
+                )
+                or "independent"
+            ).strip().lower()
+
+            if spacing_mode == "fraction_of_c_normal":
+                lines.append(
+                    "Periodic stacking: "
+                    f"{len(sequence)} sequence row(s), "
+                    "spacing = "
+                    f"{stacking_spec.get('stacking_fraction', '?')} "
+                    "× parent c-normal"
+                )
+            else:
+                lines.append(
+                    "Periodic stacking: "
+                    f"{len(sequence)} sequence row(s), "
+                    f"spacing = "
+                    f"{stacking_spec.get('nominal_spacing', '?')} Å"
+                )
+
+            lines.append(
+                "Repeat period: "
+                f"{stacking_spec.get('repeat_period', '?')}"
+            )
+
+        else:
+            lines.append(
+                f"Axis 3: {axis3_cells} cells"
+            )
+
+        if search_mode == "grid_search":
+            lines.append(
+                "Mode: crystallite-size grid search"
             )
         else:
-            txt = (
-                f"Mode: grid search\n"
-                f"Shape: {spec.get('shape_type', 'unknown')}\n"
-                f"Diameter scan: {spec.get('diameter_min_cells', '?')} "
-                f"to {spec.get('diameter_max_cells', '?')} cells\n"
-                f"Height scan: {spec.get('height_min_cells', '?')} "
-                f"to {spec.get('height_max_cells', '?')} cells\n"
-                f"Step: {spec.get('step_cells', '?')} cells\n"
-                f"Axis: [{spec.get('axis_h', 0)} "
-                f"{spec.get('axis_k', 0)} "
-                f"{spec.get('axis_l', 1)}]"
+            lines.append(
+                "Mode: pre-defined dimensions"
             )
 
-        self.lbl_shape_summary.setText(txt)
+        lines.append(
+            "Shape axis: "
+            f"[{shape_spec.get('axis_h', 0)} "
+            f"{shape_spec.get('axis_k', 0)} "
+            f"{shape_spec.get('axis_l', 1)}]"
+        )
 
+        if stacking_enabled:
+            spacing_treatment = str(
+                stacking_search.get(
+                    "spacing_treatment",
+                    "fixed",
+                )
+            )
 
+            lateral_treatment = str(
+                stacking_search.get(
+                    "lateral_treatment",
+                    "fixed",
+                )
+            )
+
+            lines.append(
+                f"Spacing treatment: {spacing_treatment}"
+            )
+
+            lines.append(
+                f"Lateral shift treatment: {lateral_treatment}"
+            )
+
+            if spacing_treatment == "grid":
+                lines.append(
+                    "Spacing grid: "
+                    f"{stacking_search.get('spacing_minimum', '?')} "
+                    "to "
+                    f"{stacking_search.get('spacing_maximum', '?')} Å, "
+                    f"step "
+                    f"{stacking_search.get('spacing_step', '?')} Å"
+                )
+
+            if lateral_treatment in {
+                "grid",
+                "random",
+            }:
+                lines.append(
+                    "Lateral target: "
+                    f"{stacking_search.get('lateral_target', 'repeat_translation')}"
+                )
+
+        vector_refinement = dict(
+            getattr(
+                self,
+                "_stacking_vector_refinement_spec",
+                {},
+            )
+            or {}
+        )
+        
+        refined_vector_names = [
+            name
+            for name, state in vector_refinement.items()
+            if isinstance(state, dict)
+            and bool(
+                state.get(
+                    "refine",
+                    False,
+                )
+            )
+        ]
+        
+        if refined_vector_names:
+            lines.append(
+                "Refined stacking vectors: "
+                + ", ".join(
+                    refined_vector_names
+                )
+            )
+        else:
+            lines.append(
+                "Stacking vectors: fixed"
+            )
+
+        self.lbl_shape_summary.setText(
+            "\n".join(
+                lines
+            )
+        )
+
+        
     def _current_structure_for_shape_dialog(self):
         """
         Read the current structure only when the crystallite-shape dialog is opened.
@@ -1231,53 +1623,167 @@ class InputBuilder(QtWidgets.QWidget):
 
     def open_crystallite_shape_dialog(self) -> None:
         """
-        Open the crystallite-shape dialog.
-
-        The dialog and its PyVista/VTK viewer are imported only when the user
-        actually presses the Build crystallite shape button.
+        Open the finite-crystallite and periodic-stacking builder.
         """
-        from .crystallite_shape_dialog import CrystalliteShapeDialog
+        from .finite_crystallite_builder import (
+            FiniteCrystalliteBuilderDialog,
+        )
 
-        structure = self._current_structure_for_shape_dialog()
+        structure = (
+            self._current_structure_for_shape_dialog()
+        )
 
-        dlg = CrystalliteShapeDialog(
-            self,
-            initial_spec=getattr(
+        initial_state = dict(
+            getattr(
                 self,
                 "_crystallite_shape_spec",
                 {},
-            ) or {},
-            lattice_params=self._current_lattice_params_for_shape_dialog(),
-            structure=structure,
+            )
+            or {}
         )
 
-        def accept_shape(spec: dict):
-            spec = dict(spec or {})
-            spec["mode"] = "finite_shape"
+        initial_state["stacking"] = dict(
+            getattr(
+                self,
+                "_layer_stacking_spec",
+                {},
+            )
+            or {}
+        )
 
-            self._crystallite_shape_spec = spec
+        initial_state["stacking_search"] = dict(
+            getattr(
+                self,
+                "_stacking_search_spec",
+                {},
+            )
+            or {}
+        )
+
+        initial_state["stacking_refinement"] = dict(
+            getattr(
+                self,
+                "_stacking_refinement_spec",
+                {},
+            )
+            or {}
+        )
+
+
+        dialog = FiniteCrystalliteBuilderDialog(
+            self,
+            structure=structure,
+            initial_state=initial_state,
+        )
+
+        def accept_shape(
+            output: dict,
+        ) -> None:
+            output = dict(
+                output
+                or {}
+            )
+
+            print(
+                "[BUILDER ACCEPT SHAPE] "
+                f"keys={sorted(output.keys())}",
+                flush=True,
+            )
+
+            stacking_spec = output.pop(
+                "stacking",
+                {},
+            )
+
+            stacking_search_spec = output.pop(
+                "stacking_search",
+                {},
+            )
+
+            stacking_refinement_spec = output.pop(
+                "stacking_refinement",
+                {},
+            )
+
+            if not isinstance(
+                stacking_spec,
+                dict,
+            ):
+                stacking_spec = {}
+
+            if not isinstance(
+                stacking_search_spec,
+                dict,
+            ):
+                stacking_search_spec = {}
+
+            if not isinstance(
+                stacking_refinement_spec,
+                dict,
+            ):
+                stacking_refinement_spec = {}
+
+            sequence = stacking_spec.get(
+                "sequence",
+                [],
+            )
+
+
+            print(
+                "[BUILDER ACCEPT SHAPE] "
+                f"sequence_rows="
+                f"{len(sequence) if isinstance(sequence, list) else 0}, "
+                f"stacking_refinement="
+                f"{stacking_refinement_spec}",
+                flush=True,
+            )
+
+            output["mode"] = "finite_shape"
+
+            self._crystallite_shape_spec = dict(
+                output
+            )
+
+            self._layer_stacking_spec = dict(
+                stacking_spec
+            )
+
+            self._stacking_search_spec = dict(
+                stacking_search_spec
+            )
+
+            self._stacking_refinement_spec = dict(
+                stacking_refinement_spec
+            )
 
             try:
-                self.gb_size.setChecked(True)
+                self.gb_size.setChecked(
+                    True
+                )
             except Exception:
                 pass
 
             try:
-                self.combo_size_model.setCurrentIndex(2)
+                self.combo_size_model.setCurrentIndex(
+                    2
+                )
             except Exception:
                 pass
 
             self._update_shape_summary_label()
             self._emit_changed_if_not_blocked()
 
-        dlg.shapeAccepted.connect(accept_shape)
+
+        dialog.shapeAccepted.connect(
+            accept_shape
+        )
 
         QtCore.QTimer.singleShot(
             0,
-            dlg.showMaximized,
+            dialog.showMaximized,
         )
 
-        dlg.exec()
+        dialog.exec()
 
         try:
             main_window = self.window()
@@ -1709,6 +2215,10 @@ class InputBuilder(QtWidgets.QWidget):
                         use_flags=new_use,
                     )
 
+                    for kind, state in self._species_refine.items():
+                        for element in list(state["checks"]):
+                            self._on_site_refine_flag_toggled(element, kind)
+
                     self._emit_changed_if_not_blocked()
 
                 except Exception as e:
@@ -2012,6 +2522,191 @@ class InputBuilder(QtWidgets.QWidget):
         return raw.lower() == el.lower()
 
 
+    def _make_species_refine_box(self, kind: str, title: str, tooltip: str):
+        """Group box with one checkbox per element (filled later)."""
+        box = QtWidgets.QGroupBox(title)
+        box.setToolTip(tooltip)
+
+        v_box = QtWidgets.QVBoxLayout(box)
+        v_box.setContentsMargins(6, 4, 6, 4)
+        v_box.setSpacing(4)
+
+        layout = QtWidgets.QHBoxLayout()
+        layout.addStretch(1)
+        v_box.addLayout(layout)
+
+        self._species_refine[kind] = {
+            "selected": set(),
+            "checks": {},
+            "layout": layout,
+        }
+
+        return box, v_box
+
+    def _rebuild_species_refine_checks(self) -> None:
+        """
+        One checkbox per structure element in every element-refinement box.
+        Keeps the current selection for elements still present.
+        """
+        elements = sorted(
+            getattr(self, "_element_biso_elements", set()) or set()
+        )
+
+        for kind, state in (getattr(self, "_species_refine", {}) or {}).items():
+            layout = state["layout"]
+
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+
+                if widget is not None:
+                    widget.deleteLater()
+
+            state["checks"] = {}
+
+            if not elements:
+                hint = QtWidgets.QLabel("Load a structure to list its elements.")
+                hint.setEnabled(False)
+                layout.addWidget(hint)
+                layout.addStretch(1)
+                continue
+
+            selected_lc = {s.lower() for s in state["selected"]}
+
+            for element in elements:
+                chk = QtWidgets.QCheckBox(element)
+                chk.setChecked(element.lower() in selected_lc)
+                chk.toggled.connect(
+                    lambda checked, el=element, k=kind: self._on_species_refine_toggled(
+                        k,
+                        el,
+                        checked,
+                    )
+                )
+                layout.addWidget(chk)
+                state["checks"][element] = chk
+
+            layout.addStretch(1)
+
+            # Drop selections for elements not in this structure.
+            state["selected"] = {
+                el for el in elements if el.lower() in selected_lc
+            }
+
+    def _on_species_refine_toggled(self, kind: str, element: str, checked: bool) -> None:
+        state = self._species_refine[kind]
+
+        if checked:
+            state["selected"].add(element)
+        else:
+            state["selected"].discard(element)
+
+        # Mirror the choice in the site table (only rows shown there).
+        try:
+            self.tbl_sites.set_refine_flags_for_element(element, checked, kind)
+        except Exception:
+            pass
+
+        self._emit_changed_if_not_blocked()
+
+    def _on_site_refine_flag_toggled(self, element: str, kind: str) -> None:
+        """
+        Keep an element checkbox in step with the site table: checked only
+        while every flag of that kind on every row of the element is set.
+
+        Unticking one site therefore unticks the element (the other sites
+        keep their own flags); ticking the last one ticks it.
+        """
+        state = (getattr(self, "_species_refine", {}) or {}).get(kind)
+        element = clean_el_symbol(element)
+
+        if state is None or not element:
+            return
+
+        all_checked = self.tbl_sites.element_refine_state(element, kind)
+
+        if all_checked is None:
+            return
+
+        match = next(
+            (
+                (name, chk)
+                for name, chk in state["checks"].items()
+                if name.lower() == element.lower()
+            ),
+            None,
+        )
+
+        if all_checked:
+            state["selected"].add(match[0] if match else element)
+        else:
+            state["selected"] = {
+                s for s in state["selected"]
+                if s.lower() != element.lower()
+            }
+
+        if match is not None:
+            chk = match[1]
+            chk.blockSignals(True)
+            try:
+                chk.setChecked(bool(all_checked))
+            finally:
+                chk.blockSignals(False)
+
+    def _set_species_refine_from_config(self, kind: str, value) -> None:
+        """Restore one element-refinement box from its input keyword."""
+        state = (getattr(self, "_species_refine", {}) or {}).get(kind)
+
+        if state is None or value is None:
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            items = [str(v) for v in value]
+        else:
+            items = re.split(r"[,;\s]+", str(value))
+
+        state["selected"] = {
+            clean_el_symbol(item)
+            for item in items
+            if clean_el_symbol(item)
+        }
+
+        selected_lc = {s.lower() for s in state["selected"]}
+
+        for element, chk in state["checks"].items():
+            chk.blockSignals(True)
+            try:
+                chk.setChecked(element.lower() in selected_lc)
+            finally:
+                chk.blockSignals(False)
+
+        self._sync_species_refine_to_table(kind)
+
+    def _sync_species_refine_to_table(self, kind: str | None = None) -> None:
+        """Tick the table flags for every row of a selected element."""
+        table = getattr(self, "tbl_sites", None)
+
+        if table is None:
+            return
+
+        for k, state in (getattr(self, "_species_refine", {}) or {}).items():
+            if kind is not None and k != kind:
+                continue
+
+            for element in sorted(state["selected"]):
+                try:
+                    table.set_refine_flags_for_element(element, True, k)
+                except Exception:
+                    pass
+
+    def _species_refine_text(self, kind: str) -> str:
+        state = (getattr(self, "_species_refine", {}) or {}).get(kind)
+
+        if state is None:
+            return ""
+
+        return ", ".join(sorted(state["selected"]))
+
     def _on_biso_mode_changed(self, checked: bool) -> None:
         """
         Switch between element-grouped and site-specific Biso mode.
@@ -2045,13 +2740,17 @@ class InputBuilder(QtWidgets.QWidget):
                 self.tbl_sites.blockSignals(True)
 
                 for row in range(self.tbl_sites.rowCount()):
-                    # Column 14 = Use Biso?
-                    it_use = self.tbl_sites.item(row, 14)
+                    it_use = self.tbl_sites.item(
+                        row,
+                        SiteParamTableWidget.COL_BISO_USE,
+                    )
                     if it_use is not None:
                         it_use.setCheckState(Qt.Unchecked)
 
-                    # Column 15 = Rbiso
-                    it_ref = self.tbl_sites.item(row, 15)
+                    it_ref = self.tbl_sites.item(
+                        row,
+                        SiteParamTableWidget.COL_BISO_REF,
+                    )
                     if it_ref is not None:
                         it_ref.setCheckState(Qt.Unchecked)
 
@@ -2320,10 +3019,87 @@ class InputBuilder(QtWidgets.QWidget):
 
         
     def _on_structure_path_changed(self) -> None:
+        """
+        Called when the user chooses or edits a new structure file.
+
+        A new CIF should replace the displayed parent lattice parameters.
+        Loading an existing input file does not use this overwrite path.
+        """
         if self._block:
             return
-        path = (self.le_structure.text() or "").strip()
-        self._update_symmetry_from_structure(path)
+
+        path = str(
+            self.le_structure.text()
+            or ""
+        ).strip()
+
+        self._update_symmetry_from_structure(
+            path,
+            overwrite_lattice=True,
+        )
+
+        try:
+            for row in range(
+                self.tbl_struct.rowCount()
+            ):
+                name_item = self.tbl_struct.item(
+                    row,
+                    0,
+                )
+
+                refine_item = self.tbl_struct.item(
+                    row,
+                    4,
+                )
+
+                minimum_item = self.tbl_struct.item(
+                    row,
+                    2,
+                )
+
+                maximum_item = self.tbl_struct.item(
+                    row,
+                    3,
+                )
+
+                if name_item is None:
+                    continue
+
+                parameter_name = str(
+                    name_item.data(
+                        Qt.UserRole
+                    )
+                    or name_item.text()
+                ).strip().lower()
+
+                if parameter_name not in {
+                    "a",
+                    "b",
+                    "c",
+                    "alpha",
+                    "beta",
+                    "gamma",
+                }:
+                    continue
+
+                if refine_item is not None:
+                    refine_item.setCheckState(
+                        Qt.Unchecked
+                    )
+
+                if minimum_item is not None:
+                    minimum_item.setText(
+                        ""
+                    )
+
+                if maximum_item is not None:
+                    maximum_item.setText(
+                        ""
+                    )
+
+        except Exception:
+            pass
+
         self._emit_changed_if_not_blocked()
 
     def _contrast_terms_from_loaded_parameters(
@@ -2398,6 +3174,8 @@ class InputBuilder(QtWidgets.QWidget):
     def _update_symmetry_from_structure(
         self,
         path: str,
+        *,
+        overwrite_lattice: bool = False,
     ) -> None:
         """
         Load only lightweight CIF metadata for the Builder.
@@ -2426,7 +3204,9 @@ class InputBuilder(QtWidgets.QWidget):
             not path
             or not os.path.exists(path)
         ):
-            self._apply_params_to_tables_from_current()
+            self._apply_params_to_tables_from_current(
+                overwrite_keys=set(),
+            )
             return
 
         from .structure_metadata import read_structure_metadata
@@ -2562,6 +3342,8 @@ class InputBuilder(QtWidgets.QWidget):
                 element
             )
         }
+
+        self._rebuild_species_refine_checks()
 
         self._pair_labels_for_dynamics = [
             str(pair)
@@ -2879,10 +3661,46 @@ class InputBuilder(QtWidgets.QWidget):
             except Exception:
                 pass
 
+        if overwrite_lattice:
+            for lattice_key in (
+                "a",
+                "b",
+                "c",
+                "alpha",
+                "beta",
+                "gamma",
+            ):
+                self._hidden_ini.pop(
+                    lattice_key,
+                    None,
+                )
+
+                self._hidden_ref.pop(
+                    lattice_key,
+                    None,
+                )
+
+                self._hidden_bnd.pop(
+                    lattice_key,
+                    None,
+                )
+
         self._apply_params_to_tables_from_current(
             drop_prefixes=tuple(),
             seed_overrides=seed_values,
             keep_keys=set(),
+            overwrite_keys=(
+                {
+                    "a",
+                    "b",
+                    "c",
+                    "alpha",
+                    "beta",
+                    "gamma",
+                }
+                if overwrite_lattice
+                else set()
+            ),
         )
 
         self._last_structure_path = path
@@ -2910,6 +3728,18 @@ class InputBuilder(QtWidgets.QWidget):
         refinable: Dict[str, Any],
         bounds: Dict[str, Any],
     ) -> None:
+        print(
+            "[GUI COUNTS] Rebuilding parameter tables: "
+            f"initial={len(initial):,}, "
+            f"refinable={len(refinable):,}, "
+            f"bounds={len(bounds):,}, "
+            f"site_records="
+            f"{len(getattr(self, '_site_records_for_gui', []) or []):,}, "
+            f"elements="
+            f"{len(getattr(self, '_element_biso_elements', set()) or set()):,}",
+            flush=True,
+        )
+
         # Reset hidden stores on each full rebuild
         self._hidden_ini = {}
         self._hidden_ref = {}
@@ -3269,6 +4099,8 @@ class InputBuilder(QtWidgets.QWidget):
         except Exception:
             pass
 
+        self._sync_species_refine_to_table()
+
         # ---------------------------------------------------------
         # Element-grouped Biso table
         # ---------------------------------------------------------
@@ -3365,6 +4197,7 @@ class InputBuilder(QtWidgets.QWidget):
         drop_prefixes: Tuple[str, ...] = tuple(),
         seed_overrides: Optional[Dict[str, Any]] = None,
         keep_keys: Optional[set[str]] = None,
+        overwrite_keys: Optional[set[str]] = None,
     ) -> None:
         """
         Collect current values/refine flags/bounds from all parameter tables + lambda list,
@@ -3475,11 +4308,36 @@ class InputBuilder(QtWidgets.QWidget):
                     bounds_all.pop(k, None)
                     self._dyn_use_flags.pop(str(k), None)
 
-        # Seed overrides (e.g. read Biso values from CIF)
-        if isinstance(seed_overrides, dict):
-            for k, v in seed_overrides.items():
-                if k not in init_all:
-                    init_all[k] = v
+        # Seed overrides from CIF metadata.
+        #
+        # Normally these values only fill missing GUI parameters. When the
+        # user chooses a different CIF, ``overwrite_keys`` contains the
+        # lattice names that must be replaced by the new CIF values.
+        overwrite_keys_normalized = {
+            str(key).strip().lower()
+            for key in (
+                overwrite_keys
+                or set()
+            )
+        }
+
+        if isinstance(
+            seed_overrides,
+            dict,
+        ):
+            for key, value in seed_overrides.items():
+                key_text = str(
+                    key
+                ).strip()
+
+                key_lower = key_text.lower()
+
+                if (
+                    key_text not in init_all
+                    or key_lower
+                    in overwrite_keys_normalized
+                ):
+                    init_all[key_text] = value
 
         self._apply_params_to_tables(init_all, ref_all, bounds_all)
 
@@ -3552,6 +4410,41 @@ class InputBuilder(QtWidgets.QWidget):
 
             # ---- refinement ----
             refsec = cfg.get("refinement", cfg) if isinstance(cfg.get("refinement", cfg), dict) else cfg
+
+            for kind, keyword in (
+                ("occ", "refine_occ_species"),
+                ("xyz", "refine_xyz_species"),
+            ):
+                if isinstance(refsec, dict) and keyword in refsec:
+                    self._set_species_refine_from_config(
+                        kind,
+                        refsec.get(keyword),
+                    )
+                elif "refinement" in cfg:
+                    # A full input file without the key: no element selected.
+                    self._set_species_refine_from_config(kind, "")
+
+            for spin, key, default in (
+                (self.spin_occ_min, "occ_min", 0.0),
+                (self.spin_occ_max, "occ_max", 1.0),
+                (self.spin_xyz_max_shift, "xyz_max_shift", 0.3),
+            ):
+                value = refsec.get(key, None) if isinstance(refsec, dict) else None
+
+                if value is None and "refinement" not in cfg:
+                    continue
+
+                try:
+                    number = float(default if value is None else value)
+                except (TypeError, ValueError):
+                    number = default
+
+                spin.blockSignals(True)
+                try:
+                    spin.setValue(number)
+                finally:
+                    spin.blockSignals(False)
+
             staged = refsec.get("staged_refinement", cfg.get("staged_refinement", None))
             if staged is not None:
                 self.chk_staged.setChecked(bool(staged))
@@ -4123,12 +5016,139 @@ class InputBuilder(QtWidgets.QWidget):
 
                 if isinstance(shape_cfg, dict):
                     self._crystallite_shape_spec = dict(shape_cfg)
+                    
                 else:
                     self._crystallite_shape_spec = {}
+
+                stacking_cfg = cfg.get(
+                    "layer_stacking",
+                    {},
+                ) or {}
+
+                if isinstance(
+                    stacking_cfg,
+                    dict,
+                ):
+                    self._layer_stacking_spec = dict(
+                        stacking_cfg
+                    )
+
+                    stochastic_parameter_to_stack_key = {
+                        "stack_state_a_du": "state_a_du",
+                        "stack_state_a_dv": "state_a_dv",
+                        "stack_state_a_h": "state_a_h",
+                        "stack_state_b_du": "state_b_du",
+                        "stack_state_b_dv": "state_b_dv",
+                        "stack_state_b_h": "state_b_h",
+                    }
+
+                    for (
+                        parameter_name,
+                        stack_key,
+                    ) in stochastic_parameter_to_stack_key.items():
+                        if parameter_name not in initial:
+                            continue
+
+                        try:
+                            self._layer_stacking_spec[
+                                stack_key
+                            ] = float(
+                                initial[
+                                    parameter_name
+                                ]
+                            )
+                        except Exception:
+                            pass
+
+                    try:
+                        from pdf_fitting.models.layer_stacking import (
+                            LayerStackSpec,
+                        )
+
+                        from pdf_fitting.models.stacking_transitions import (
+                            apply_transition_parameters_to_stack_spec,
+                        )
+
+                        loaded_stack_spec = (
+                            LayerStackSpec.from_dict(
+                                self._layer_stacking_spec
+                            )
+                        )
+
+                        loaded_stack_spec = (
+                            apply_transition_parameters_to_stack_spec(
+                                loaded_stack_spec,
+                                initial,
+                            )
+                        )
+
+                        self._layer_stacking_spec = (
+                            loaded_stack_spec.to_dict()
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "[BUILDER] Could not apply generic stacking "
+                            f"parameters to GUI state: {exc}"
+                        )
+
+                else:
+                    self._layer_stacking_spec = {}
+
+                try:
+                    self._stacking_vector_refinement_spec = (
+                        self._stacking_vector_refinement_from_config(
+                            initial,
+                            refinable,
+                            bounds_norm,
+                            self._layer_stacking_spec,
+                        )
+                    )
+
+                except Exception as exc:
+                    print(
+                        "[BUILDER] Legacy stacking-vector refinement state "
+                        f"could not be restored: {exc}",
+                        flush=True,
+                    )
+
+                    self._stacking_vector_refinement_spec = {}
 
                 mode = str(
                     self._crystallite_shape_spec.get("mode", "conventional")
                 ).strip().lower()
+
+
+                stacking_search_cfg = cfg.get(
+                    "stacking_search",
+                    {},
+                ) or {}
+
+                stacking_refinement_cfg = cfg.get(
+                    "stacking_refinement",
+                    {},
+                ) or {}
+
+                if isinstance(
+                    stacking_refinement_cfg,
+                    dict,
+                ):
+                    self._stacking_refinement_spec = dict(
+                        stacking_refinement_cfg
+                    )
+                else:
+                    self._stacking_refinement_spec = {}
+
+                if isinstance(
+                    stacking_search_cfg,
+                    dict,
+                ):
+                    self._stacking_search_spec = dict(
+                        stacking_search_cfg
+                    )
+                else:
+                    self._stacking_search_spec = {}
+
 
                 # Finite crystallite shape created by the shape-builder dialog.
                 if mode == "finite_shape":
@@ -4148,9 +5168,13 @@ class InputBuilder(QtWidgets.QWidget):
 
                 self._update_shape_summary_label()
 
-            except Exception:
-                self.combo_size_model.setCurrentIndex(0)
-                self._crystallite_shape_spec = {}
+            except Exception as exc:
+                print(
+                    "[BUILDER] Could not restore finite-shape/stacking "
+                    f"configuration from input: {exc}",
+                    flush=True,
+                )
+
                 self._update_shape_summary_label()
 
 
@@ -4158,40 +5182,7 @@ class InputBuilder(QtWidgets.QWidget):
             # from the loaded input dictionaries. This is essential because site records
             # only exist after reading the CIF/structure, and otherwise Biso refine flags
             # can be reset to False.
-            try:
-                site_use_flags = dict(getattr(self, "_site_use_flags", {}) or {})
 
-                # If a site parameter exists in the loaded input/refinable/bounds,
-                # consider it used.
-                explicit_site_keys = (
-                    set(str(k) for k in initial.keys())
-                    | set(str(k) for k in refinable.keys())
-                    | set(str(k) for k in bounds_norm.keys())
-                )
-
-                for k in explicit_site_keys:
-                    kl = str(k).strip().lower()
-                    if (
-                        kl.startswith("x_")
-                        or kl.startswith("y_")
-                        or kl.startswith("z_")
-                        or kl.startswith("occ_")
-                        or kl.startswith("biso_")
-                    ):
-                        site_use_flags[str(k)] = True
-
-                self._site_use_flags = site_use_flags
-
-                self.tbl_sites.set_sites(
-                    getattr(self, "_site_records_for_gui", []) or [],
-                    initial,
-                    refinable,
-                    bounds=bounds_norm,
-                    use_flags=self._site_use_flags,
-                )
-
-            except Exception:
-                pass
             
             
             # ---- contrast factors (Ei) ----
@@ -4614,6 +5605,11 @@ class InputBuilder(QtWidgets.QWidget):
                 "compute_pair_contributions_on_finish": bool(self.chk_compute_pair_contrib.isChecked()),
                 "compute_warren_on_finish": bool(self.chk_compute_warren.isChecked()),
                 "compute_local_trends_on_finish": bool(self.chk_compute_local_trends.isChecked()),
+                "refine_occ_species": self._species_refine_text("occ"),
+                "occ_min": float(self.spin_occ_min.value()),
+                "occ_max": float(self.spin_occ_max.value()),
+                "refine_xyz_species": self._species_refine_text("xyz"),
+                "xyz_max_shift": float(self.spin_xyz_max_shift.value()),
                 "export_finite_coordination": bool(self.chk_export_finite_coordination.isChecked()),
                 "refinement_r_step_final": float(self.spin_rstep_final.value()),
                 "max_nfev_final": int(self.spin_max_nfev.value()),
@@ -4631,6 +5627,17 @@ class InputBuilder(QtWidgets.QWidget):
                     or "cpu"
                 ),
 
+                "numba_threads": int(
+                    os.cpu_count()
+                    or 1
+                ),
+
+                "stochastic_topology_workers": 0,
+
+                "stochastic_collapse_realizations": True,
+
+                "stochastic_deduplicate_paths": True,
+
                 "gpu_device": int(
                     self.spin_gpu_device.value()
                 ),
@@ -4638,6 +5645,7 @@ class InputBuilder(QtWidgets.QWidget):
                 "gpu_memory_fraction": float(
                     self.spin_gpu_memory_fraction.value()
                 ),
+
             },
             "initial_values": {},
             "refinable_parameters": {},
@@ -4647,6 +5655,10 @@ class InputBuilder(QtWidgets.QWidget):
 
             # NEW: anisotropic/finite crystallite shape settings
             "crystallite_shape": {},
+            "layer_stacking": {},
+            "stacking_search": {},
+            "stacking_refinement": {},
+            "stacking_vector_search": {},
         }
 
         # ---------------------------------------------------------
@@ -4722,16 +5734,1210 @@ class InputBuilder(QtWidgets.QWidget):
 
 
         if self.gb_size.isChecked():
-        
+
             if use_shape_builder:
-                # New finite-shape / anisotropic-shape mode.
-                shape_spec = dict(getattr(self, "_crystallite_shape_spec", {}) or {})
-                shape_spec["mode"] = "finite_shape"
+                # -------------------------------------------------
+                # Finite crystallite shape
+                # -------------------------------------------------
+                shape_spec = dict(
+                    getattr(
+                        self,
+                        "_crystallite_shape_spec",
+                        {},
+                    )
+                    or {}
+                )
 
-                out["crystallite_shape"] = shape_spec
+                shape_spec["mode"] = (
+                    "finite_shape"
+                )
 
-                # In finite-shape mode, conventional spherical size parameters
-                # must be completely removed from the input file.
+                out["crystallite_shape"] = (
+                    shape_spec
+                )
+
+                # -------------------------------------------------
+                # Infinite periodic stacking sequence
+                # -------------------------------------------------
+                stacking_spec = dict(
+                    getattr(
+                        self,
+                        "_layer_stacking_spec",
+                        {},
+                    )
+                    or {}
+                )
+
+                sequence = stacking_spec.get(
+                    "sequence",
+                    None,
+                )
+
+                # Work on a copy without modifying the Builder's authoritative
+                # in-memory stacking specification.
+                stacking_section = dict(
+                    stacking_spec
+                )
+
+                stacking_section.pop(
+                    "sequence",
+                    None,
+                )
+
+                if not isinstance(
+                    sequence,
+                    list,
+                ):
+                    sequence = []
+
+                out["layer_stacking"] = dict(
+                    stacking_section
+                )
+
+                for structured_key in (
+                    "markov_states",
+                    "markov_transition_matrix",
+                    "markov_probability_controls",
+                ):
+                    structured_value = out[
+                        "layer_stacking"
+                    ].get(
+                        structured_key,
+                        None,
+                    )
+
+                    if isinstance(
+                        structured_value,
+                        (
+                            list,
+                            tuple,
+                        ),
+                    ):
+                        out[
+                            "layer_stacking"
+                        ][
+                            structured_key
+                        ] = json.dumps(
+                            structured_value,
+                            separators=(
+                                ",",
+                                ":",
+                            ),
+                        )
+                        
+                # -------------------------------------------------
+                # INI files have only scalar values. Store generic
+                # Markov state definitions and transition matrices as
+                # valid JSON strings, never as Python str(list).
+                #
+                # Valid JSON is portable and can be decoded safely by
+                # LayerStackSpec.from_dict().
+                # -------------------------------------------------
+                for structured_key in (
+                    "markov_states",
+                    "markov_transition_matrix",
+                    "markov_probability_controls",
+                ):
+                    structured_value = out[
+                        "layer_stacking"
+                    ].get(
+                        structured_key,
+                        None,
+                    )
+
+                    if isinstance(
+                        structured_value,
+                        (
+                            list,
+                            tuple,
+                        ),
+                    ):
+                        out[
+                            "layer_stacking"
+                        ][
+                            structured_key
+                        ] = json.dumps(
+                            structured_value,
+                            separators=(
+                                ",",
+                                ":",
+                            ),
+                        )
+
+                # Never destroy a previously valid sequence because of a
+                # temporary missing GUI state.
+                if (
+                    isinstance(
+                        sequence,
+                        list,
+                    )
+                    and len(
+                        sequence
+                    ) > 0
+                ):
+                    out["layer_stacking"][
+                        "sequence_json"
+                    ] = json.dumps(
+                        sequence,
+                        separators=(
+                            ",",
+                            ":",
+                        ),
+                    )
+
+                stacking_refinement = dict(
+                    getattr(
+                        self,
+                        "_stacking_refinement_spec",
+                        {},
+                    )
+                    or {}
+                )
+
+                transitions = stacking_refinement.get(
+                    "transitions",
+                    [],
+                )
+
+                if not isinstance(
+                    transitions,
+                    list,
+                ):
+                    transitions = []
+
+                stochastic_vectors = dict(
+                    stacking_refinement.get(
+                        "stochastic_vectors",
+                        {},
+                    )
+                    or {}
+                )
+
+                out["stacking_refinement"] = {
+                    "treatment": str(
+                        stacking_refinement.get(
+                            "treatment",
+                            "fixed",
+                        )
+                    ),
+                    "transitions_json": json.dumps(
+                        transitions,
+                        separators=(
+                            ",",
+                            ":",
+                        ),
+                    ),
+                    "stochastic_vectors_json": json.dumps(
+                        stochastic_vectors,
+                        separators=(
+                            ",",
+                            ":",
+                        ),
+                    ),
+                }
+
+                # -------------------------------------------------
+                # Stochastic State A/B vector refinement parameters
+                #
+                # These are used only by:
+                #
+                #     model = correlated_ab_disorder
+                #
+                # P(alternate) is intentionally excluded because it is
+                # handled as a discrete outer grid-search variable.
+                # -------------------------------------------------
+                stochastic_parameter_values = {
+                    "stack_state_a_du": float(
+                        stacking_spec.get(
+                            "state_a_du",
+                            0.0,
+                        )
+                    ),
+                    "stack_state_a_dv": float(
+                        stacking_spec.get(
+                            "state_a_dv",
+                            0.0,
+                        )
+                    ),
+                    "stack_state_a_h": float(
+                        stacking_spec.get(
+                            "state_a_h",
+                            3.8,
+                        )
+                    ),
+                    "stack_state_b_du": float(
+                        stacking_spec.get(
+                            "state_b_du",
+                            0.0,
+                        )
+                    ),
+                    "stack_state_b_dv": float(
+                        stacking_spec.get(
+                            "state_b_dv",
+                            0.0,
+                        )
+                    ),
+                    "stack_state_b_h": float(
+                        stacking_spec.get(
+                            "state_b_h",
+                            3.8,
+                        )
+                    ),
+                }
+
+                stochastic_vector_controls = dict(
+                    stacking_refinement.get(
+                        "stochastic_vectors",
+                        {},
+                    )
+                    or {}
+                )
+
+                stochastic_parameter_names = list(
+                    stochastic_parameter_values.keys()
+                )
+
+                # This must be defined BEFORE it is used below.
+                stacking_enabled = bool(
+                    stacking_spec.get(
+                        "enabled",
+                        False,
+                    )
+                )
+
+                stacking_model_name = str(
+                    stacking_spec.get(
+                        "model",
+                        "periodic_sequence",
+                    )
+                    or "periodic_sequence"
+                ).strip().lower()
+
+                if (
+                    stacking_enabled
+                    and stacking_model_name
+                    == "generic_markov"
+                ):
+                    generic_states = list(
+                        stacking_spec.get(
+                            "markov_states",
+                            [],
+                        )
+                        or []
+                    )
+
+                    for state_index, state in enumerate(
+                        generic_states
+                    ):
+                        if not isinstance(
+                            state,
+                            dict,
+                        ):
+                            continue
+
+                        state_uid = str(
+                            state.get(
+                                "uid",
+                                state_index,
+                            )
+                        ).strip()
+
+                        if not state_uid:
+                            state_uid = str(
+                                state_index
+                            )
+
+                        parameter_map = {
+                            f"stack_state_{state_uid}_du": (
+                                float(
+                                    state.get(
+                                        "du",
+                                        0.0,
+                                    )
+                                ),
+                                -0.5,
+                                0.5,
+                            ),
+                            f"stack_state_{state_uid}_dv": (
+                                float(
+                                    state.get(
+                                        "dv",
+                                        0.0,
+                                    )
+                                ),
+                                -0.5,
+                                0.5,
+                            ),
+                            f"stack_state_{state_uid}_h": (
+                                float(
+                                    state.get(
+                                        "h",
+                                        3.8,
+                                    )
+                                ),
+                                0.001,
+                                20.0,
+                            ),
+                        }
+
+                        for (
+                            parameter_name,
+                            (
+                                parameter_value,
+                                default_minimum,
+                                default_maximum,
+                            ),
+                        ) in parameter_map.items():
+                            control = dict(
+                                stochastic_vector_controls.get(
+                                    parameter_name,
+                                    {},
+                                )
+                                or {}
+                            )
+
+                            minimum = float(
+                                control.get(
+                                    "minimum",
+                                    default_minimum,
+                                )
+                            )
+
+                            maximum = float(
+                                control.get(
+                                    "maximum",
+                                    default_maximum,
+                                )
+                            )
+
+                            if parameter_name.endswith(
+                                "_h"
+                            ):
+                                minimum = max(
+                                    minimum,
+                                    0.001,
+                                )
+
+                                maximum = max(
+                                    maximum,
+                                    minimum,
+                                )
+
+                            elif maximum < minimum:
+                                minimum, maximum = (
+                                    maximum,
+                                    minimum,
+                                )
+
+                            out["initial_values"][
+                                parameter_name
+                            ] = float(
+                                parameter_value
+                            )
+
+                            out["refinable_parameters"][
+                                parameter_name
+                            ] = bool(
+                                control.get(
+                                    "refine",
+                                    False,
+                                )
+                            )
+
+                            out["bounds"][
+                                parameter_name
+                            ] = (
+                                str(
+                                    minimum
+                                ),
+                                str(
+                                    maximum
+                                ),
+                            )
+
+                elif (
+                    stacking_enabled
+                    and stacking_model_name
+                    == "correlated_ab_disorder"
+                ):
+                    for (
+                        parameter_name,
+                        parameter_value,
+                    ) in stochastic_parameter_values.items():
+                        control = dict(
+                            stochastic_vector_controls.get(
+                                parameter_name,
+                                {},
+                            )
+                            or {}
+                        )
+
+                        is_height = parameter_name.endswith(
+                            "_h"
+                        )
+
+                        default_minimum = (
+                            0.001
+                            if is_height
+                            else -0.5
+                        )
+
+                        default_maximum = (
+                            20.0
+                            if is_height
+                            else 0.5
+                        )
+
+                        minimum = float(
+                            control.get(
+                                "minimum",
+                                default_minimum,
+                            )
+                        )
+
+                        maximum = float(
+                            control.get(
+                                "maximum",
+                                default_maximum,
+                            )
+                        )
+
+                        if is_height:
+                            minimum = max(
+                                minimum,
+                                0.001,
+                            )
+
+                            maximum = max(
+                                maximum,
+                                minimum,
+                            )
+
+                        elif maximum < minimum:
+                            minimum, maximum = (
+                                maximum,
+                                minimum,
+                            )
+
+                        out["initial_values"][
+                            parameter_name
+                        ] = float(
+                            parameter_value
+                        )
+
+                        out["refinable_parameters"][
+                            parameter_name
+                        ] = bool(
+                            control.get(
+                                "refine",
+                                False,
+                            )
+                        )
+
+                        out["bounds"][
+                            parameter_name
+                        ] = (
+                            str(
+                                minimum
+                            ),
+                            str(
+                                maximum
+                            ),
+                        )
+
+                else:
+                    for parameter_name in stochastic_parameter_names:
+                        out["initial_values"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                        out["refinable_parameters"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                        out["bounds"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                    _add_del(
+                        "initial_values",
+                        stochastic_parameter_names,
+                    )
+
+                    _add_del(
+                        "refinable_parameters",
+                        stochastic_parameter_names,
+                    )
+
+                    _add_del(
+                        "bounds",
+                        stochastic_parameter_names,
+                    )
+
+                # -------------------------------------------------
+                # Generic Markov stacking does not use deterministic
+                # periodic transition parameters:
+                #
+                #     stack_du_*
+                #     stack_dv_*
+                #     stack_h_*
+                #
+                # Its geometry is controlled exclusively by:
+                #
+                #     stack_state_<uid>_du
+                #     stack_state_<uid>_dv
+                #     stack_state_<uid>_h
+                # -------------------------------------------------
+                if stacking_model_name == "generic_markov":
+                    obsolete_transition_names = sorted(
+                        {
+                            str(
+                                parameter_name
+                            )
+                            for section_name in (
+                                "initial_values",
+                                "refinable_parameters",
+                                "bounds",
+                            )
+                            for parameter_name in (
+                                out.get(
+                                    section_name,
+                                    {},
+                                )
+                                or {}
+                            ).keys()
+                            if str(
+                                parameter_name
+                            ).startswith(
+                                (
+                                    "stack_du_",
+                                    "stack_dv_",
+                                    "stack_h_",
+                                )
+                            )
+                        }
+                    )
+
+                    if obsolete_transition_names:
+                        for section_name in (
+                            "initial_values",
+                            "refinable_parameters",
+                            "bounds",
+                        ):
+                            for parameter_name in obsolete_transition_names:
+                                out[
+                                    section_name
+                                ].pop(
+                                    parameter_name,
+                                    None,
+                                )
+
+                            _add_del(
+                                section_name,
+                                obsolete_transition_names,
+                            )
+
+
+                # -------------------------------------------------
+                # Deterministic periodic-transition parameters.
+                #
+                # These are not valid for generic Markov stacking.
+                # -------------------------------------------------
+                if stacking_model_name != "generic_markov":
+                    from pdf_fitting.models.layer_stacking import (
+                        LayerStackSpec,
+                    )
+
+                from pdf_fitting.models.stacking_transitions import (
+                    transitions_from_stack_spec,
+                )
+
+                out.setdefault(
+                    "stacking_vector_search",
+                    {},
+                )
+
+                treatment = str(
+                    stacking_refinement.get(
+                        "treatment",
+                        "fixed",
+                    )
+                    or "fixed"
+                ).strip().lower()
+
+                transition_control_map = {}
+
+                for transition_control in transitions:
+                    if not isinstance(
+                        transition_control,
+                        dict,
+                    ):
+                        continue
+
+                    transition_id = str(
+                        transition_control.get(
+                            "transition_id",
+                            "",
+                        )
+                    ).strip()
+
+                    if transition_id:
+                        transition_control_map[
+                            transition_id
+                        ] = transition_control
+
+                try:
+                    active_stack_spec = (
+                        LayerStackSpec.from_dict(
+                            self._layer_stacking_spec
+                        )
+                    )
+
+                    physical_transitions = (
+                        transitions_from_stack_spec(
+                            active_stack_spec
+                        )
+                    )
+
+                except Exception:
+                    physical_transitions = []
+
+                generic_parameter_names = []
+
+                for physical_transition in physical_transitions:
+                    generic_parameter_names.extend(
+                        [
+                            physical_transition.parameter_du,
+                            physical_transition.parameter_dv,
+                            physical_transition.parameter_h,
+                        ]
+                    )
+
+                    control = transition_control_map.get(
+                        physical_transition.transition_id,
+                        {},
+                    )
+
+                    values_and_controls = (
+                        (
+                            physical_transition.parameter_du,
+                            float(
+                                physical_transition.du
+                            ),
+                            control.get(
+                                "u",
+                                {},
+                            ),
+                        ),
+                        (
+                            physical_transition.parameter_dv,
+                            float(
+                                physical_transition.dv
+                            ),
+                            control.get(
+                                "v",
+                                {},
+                            ),
+                        ),
+                        (
+                            physical_transition.parameter_h,
+                            float(
+                                physical_transition.h
+                            ),
+                            control.get(
+                                "h",
+                                {},
+                            ),
+                        ),
+                    )
+
+                    for (
+                        parameter_name,
+                        parameter_value,
+                        component_control,
+                    ) in values_and_controls:
+                        if not isinstance(
+                            component_control,
+                            dict,
+                        ):
+                            component_control = {}
+
+                        component_enabled = bool(
+                            component_control.get(
+                                "enabled",
+                                False,
+                            )
+                        )
+
+                        minimum = component_control.get(
+                            "minimum",
+                            (
+                                0.001
+                                if parameter_name.startswith(
+                                    "stack_h_"
+                                )
+                                else -0.5
+                            ),
+                        )
+
+                        maximum = component_control.get(
+                            "maximum",
+                            (
+                                20.0
+                                if parameter_name.startswith(
+                                    "stack_h_"
+                                )
+                                else 0.5
+                            ),
+                        )
+
+                        step = component_control.get(
+                            "step",
+                            0.05,
+                        )
+
+                        out["initial_values"][
+                            parameter_name
+                        ] = float(
+                            parameter_value
+                        )
+
+                        out["refinable_parameters"][
+                            parameter_name
+                        ] = bool(
+                            treatment == "continuous"
+                            and component_enabled
+                        )
+
+                        out["bounds"][
+                            parameter_name
+                        ] = (
+                            str(
+                                minimum
+                            ),
+                            str(
+                                maximum
+                            ),
+                        )
+
+                        out["stacking_vector_search"][
+                            f"{parameter_name}_enabled"
+                        ] = bool(
+                            treatment == "grid"
+                            and component_enabled
+                        )
+
+                        out["stacking_vector_search"][
+                            f"{parameter_name}_minimum"
+                        ] = float(
+                            minimum
+                        )
+
+                        out["stacking_vector_search"][
+                            f"{parameter_name}_maximum"
+                        ] = float(
+                            maximum
+                        )
+
+                        out["stacking_vector_search"][
+                            f"{parameter_name}_step"
+                        ] = float(
+                            step
+                        )
+
+                if treatment == "grid":
+                    out["stacking_vector_search"][
+                        "treatment"
+                    ] = "grid"
+                else:
+                    out["stacking_vector_search"] = {}
+
+                    _add_del_section(
+                        "stacking_vector_search"
+                    )
+
+                # Remove old generic transition parameters that no longer
+                # belong to the current sequence.
+                existing_generic_names = {
+                    str(
+                        name
+                    )
+                    for section_name in (
+                        "initial_values",
+                        "refinable_parameters",
+                        "bounds",
+                    )
+                    for name in (
+                        out.get(
+                            section_name,
+                            {},
+                        )
+                        or {}
+                    ).keys()
+                    if str(
+                        name
+                    ).startswith(
+                        (
+                            "stack_du_",
+                            "stack_dv_",
+                            "stack_h_",
+                        )
+                    )
+                }
+
+                stale_generic_names = sorted(
+                    existing_generic_names
+                    - set(
+                        generic_parameter_names
+                    )
+                )
+
+                if stale_generic_names:
+                    for section_name in (
+                        "initial_values",
+                        "refinable_parameters",
+                        "bounds",
+                    ):
+                        for parameter_name in stale_generic_names:
+                            out[
+                                section_name
+                            ].pop(
+                                parameter_name,
+                                None,
+                            )
+
+                        _add_del(
+                            section_name,
+                            stale_generic_names,
+                        )
+
+                vector_parameter_names = [
+                    "stack_u_ab",
+                    "stack_v_ab",
+                    "stack_u_repeat",
+                    "stack_v_repeat",
+                    "stack_delta_h",
+                ]
+
+                vector_settings = dict(
+                    getattr(
+                        self,
+                        "_stacking_vector_refinement_spec",
+                        {},
+                    )
+                    or {}
+                )
+
+                d02_supported = bool(
+                    stacking_enabled
+                    and str(
+                        stacking_spec.get(
+                            "vector_mode",
+                            "incremental",
+                        )
+                    ).strip().lower()
+                    == "incremental"
+                    and len(sequence) == 2
+                )
+
+                if d02_supported:
+                    for parameter_name in vector_parameter_names:
+                        parameter_state = dict(
+                            vector_settings.get(
+                                parameter_name,
+                                {},
+                            )
+                            or {}
+                        )
+
+                        if not parameter_state:
+                            continue
+                        
+                        out["initial_values"][
+                            parameter_name
+                        ] = float(
+                            parameter_state.get(
+                                "value",
+                                0.0,
+                            )
+                        )
+
+                        out["refinable_parameters"][
+                            parameter_name
+                        ] = bool(
+                            parameter_state.get(
+                                "refine",
+                                False,
+                            )
+                        )
+
+                        out["bounds"][
+                            parameter_name
+                        ] = (
+                            str(
+                                parameter_state.get(
+                                    "minimum",
+                                    "",
+                                )
+                            ),
+                            str(
+                                parameter_state.get(
+                                    "maximum",
+                                    "",
+                                )
+                            ),
+                        )
+
+                else:
+                    for parameter_name in vector_parameter_names:
+                        out["initial_values"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                        out["refinable_parameters"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                        out["bounds"].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                    _add_del(
+                        "initial_values",
+                        vector_parameter_names,
+                    )
+
+                    _add_del(
+                        "refinable_parameters",
+                        vector_parameter_names,
+                    )
+
+                    _add_del(
+                        "bounds",
+                        vector_parameter_names,
+                    )
+                if stacking_enabled:
+                    spacing_mode = str(
+                        stacking_spec.get(
+                            "spacing_mode",
+                            "independent",
+                        )
+                        or "independent"
+                    ).strip().lower()
+
+                    if spacing_mode == "fraction_of_c_normal":
+                        stacking_fraction = float(
+                            stacking_spec.get(
+                                "stacking_fraction",
+                                1.0,
+                            )
+                        )
+
+                        fraction_minimum = float(
+                            stacking_spec.get(
+                                "stacking_fraction_min",
+                                0.001,
+                            )
+                        )
+
+                        fraction_maximum = float(
+                            stacking_spec.get(
+                                "stacking_fraction_max",
+                                100.0,
+                            )
+                        )
+
+                        refine_fraction = bool(
+                            stacking_spec.get(
+                                "refine_stacking_fraction",
+                                False,
+                            )
+                        )
+
+                        out["initial_values"][
+                            "stacking_fraction"
+                        ] = stacking_fraction
+
+                        out["refinable_parameters"][
+                            "stacking_fraction"
+                        ] = refine_fraction
+
+                        out["bounds"][
+                            "stacking_fraction"
+                        ] = (
+                            str(
+                                fraction_minimum
+                            ),
+                            str(
+                                fraction_maximum
+                            ),
+                        )
+
+                        for section_name in (
+                            "initial_values",
+                            "refinable_parameters",
+                            "bounds",
+                        ):
+                            out[
+                                section_name
+                            ].pop(
+                                "stacking_distance",
+                                None,
+                            )
+
+                        _add_del(
+                            "initial_values",
+                            [
+                                "stacking_distance",
+                            ],
+                        )
+
+                        _add_del(
+                            "refinable_parameters",
+                            [
+                                "stacking_distance",
+                            ],
+                        )
+
+                        _add_del(
+                            "bounds",
+                            [
+                                "stacking_distance",
+                            ],
+                        )
+
+                    else:
+                        nominal_spacing = float(
+                            stacking_spec.get(
+                                "nominal_spacing",
+                                5.0,
+                            )
+                        )
+
+                        spacing_minimum = float(
+                            stacking_spec.get(
+                                "nominal_spacing_min",
+                                0.1,
+                            )
+                        )
+
+                        spacing_maximum = float(
+                            stacking_spec.get(
+                                "nominal_spacing_max",
+                                100.0,
+                            )
+                        )
+
+                        refine_spacing = bool(
+                            stacking_spec.get(
+                                "refine_nominal_spacing",
+                                False,
+                            )
+                        )
+
+                        out["initial_values"][
+                            "stacking_distance"
+                        ] = nominal_spacing
+
+                        out["refinable_parameters"][
+                            "stacking_distance"
+                        ] = refine_spacing
+
+                        out["bounds"][
+                            "stacking_distance"
+                        ] = (
+                            str(
+                                spacing_minimum
+                            ),
+                            str(
+                                spacing_maximum
+                            ),
+                        )
+
+                        for section_name in (
+                            "initial_values",
+                            "refinable_parameters",
+                            "bounds",
+                        ):
+                            out[
+                                section_name
+                            ].pop(
+                                "stacking_fraction",
+                                None,
+                            )
+
+                        _add_del(
+                            "initial_values",
+                            [
+                                "stacking_fraction",
+                            ],
+                        )
+
+                        _add_del(
+                            "refinable_parameters",
+                            [
+                                "stacking_fraction",
+                            ],
+                        )
+
+                        _add_del(
+                            "bounds",
+                            [
+                                "stacking_fraction",
+                            ],
+                        )
+
+                else:
+                    for parameter_name in (
+                        "stacking_distance",
+                        "stacking_fraction",
+                    ):
+                        for section_name in (
+                            "initial_values",
+                            "refinable_parameters",
+                            "bounds",
+                        ):
+                            out[
+                                section_name
+                            ].pop(
+                                parameter_name,
+                                None,
+                            )
+
+                        _add_del(
+                            "initial_values",
+                            [
+                                parameter_name,
+                            ],
+                        )
+
+                        _add_del(
+                            "refinable_parameters",
+                            [
+                                parameter_name,
+                            ],
+                        )
+
+                        _add_del(
+                            "bounds",
+                            [
+                                parameter_name,
+                            ],
+                        )
+
+                # Remove the obsolete transition-based section.
+                _add_del_section(
+                    "stacking_faults"
+                )
+
+                # Conventional size parameters must not coexist with an
+                # explicit finite particle.
                 size_keys = [
                     "d",
                     "d_std",
@@ -4746,14 +6952,42 @@ class InputBuilder(QtWidgets.QWidget):
                     "cyl_sigma",
                 ]
 
-                _add_del("initial_values", size_keys)
-                _add_del("refinable_parameters", size_keys)
-                _add_del("bounds", size_keys)
+                _add_del(
+                    "initial_values",
+                    size_keys,
+                )
 
-                for k in size_keys:
-                    out["initial_values"].pop(k, None)
-                    out["refinable_parameters"].pop(k, None)
-                    out["bounds"].pop(k, None)
+                _add_del(
+                    "refinable_parameters",
+                    size_keys,
+                )
+
+                _add_del(
+                    "bounds",
+                    size_keys,
+                )
+
+                for key in size_keys:
+                    out[
+                        "initial_values"
+                    ].pop(
+                        key,
+                        None,
+                    )
+
+                    out[
+                        "refinable_parameters"
+                    ].pop(
+                        key,
+                        None,
+                    )
+
+                    out[
+                        "bounds"
+                    ].pop(
+                        key,
+                        None,
+                    )
 
             else:
                 # Existing conventional spherical size model plus optional
@@ -4762,6 +6996,68 @@ class InputBuilder(QtWidgets.QWidget):
                     "mode": "conventional",
                 }
 
+                out["layer_stacking"] = {}
+                out["stochastic_ensemble"] = {}
+                out["stacking_search"] = {}
+                out["stacking_refinement"] = {}
+                out["stacking_vector_search"] = {}
+
+                _add_del_section(
+                    "stacking_search"
+                )
+
+                _add_del_section(
+                    "stacking_vector_search"
+                )
+
+                _add_del_section(
+                    "layer_stacking"
+                )
+
+                _add_del_section(
+                    "stochastic_ensemble"
+                )
+                _add_del_section(
+                    "stacking_faults"
+                )
+
+                for parameter_name in (
+                    "stacking_distance",
+                    "stacking_fraction",
+                ):
+                    for section_name in (
+                        "initial_values",
+                        "refinable_parameters",
+                        "bounds",
+                    ):
+                        out[
+                            section_name
+                        ].pop(
+                            parameter_name,
+                            None,
+                        )
+
+                    _add_del(
+                        "initial_values",
+                        [
+                            parameter_name,
+                        ],
+                    )
+
+                    _add_del(
+                        "refinable_parameters",
+                        [
+                            parameter_name,
+                        ],
+                    )
+
+                    _add_del(
+                        "bounds",
+                        [
+                            parameter_name,
+                        ],
+                    )
+        
                 sphere_keys = [
                     "d",
                     "d_std",
@@ -4815,10 +7111,67 @@ class InputBuilder(QtWidgets.QWidget):
                     out["refinable_parameters"].update(ref)
                     out["bounds"].update(bnd)
         else:
-            # Size group disabled.
-            out["crystallite_shape"] = {
-                "mode": "disabled",
-            }
+            out["layer_stacking"] = {}
+            out["stochastic_ensemble"] = {}
+            out["stacking_search"] = {}
+            out["stacking_refinement"] = {}
+
+            _add_del_section(
+                "layer_stacking"
+            )
+
+            _add_del_section(
+                "stochastic_ensemble"
+            )
+
+            _add_del_section(
+                "stacking_search"
+            )
+
+            _add_del_section(
+                "stacking_refinement"
+            )
+        
+            for parameter_name in (
+                "stacking_distance",
+                "stacking_fraction",
+            ):
+                _add_del(
+                    "initial_values",
+                    [
+                        parameter_name,
+                    ],
+                )
+
+                _add_del(
+                    "refinable_parameters",
+                    [
+                        parameter_name,
+                    ],
+                )
+
+                _add_del(
+                    "bounds",
+                    [
+                        parameter_name,
+                    ],
+                )
+
+                out["initial_values"].pop(
+                    parameter_name,
+                    None,
+                )
+
+                out["refinable_parameters"].pop(
+                    parameter_name,
+                    None,
+                )
+
+                out["bounds"].pop(
+                    parameter_name,
+                    None,
+                )
+
 
         
         # ---------------------------------------------------------
@@ -5348,6 +7701,18 @@ class InputBuilder(QtWidgets.QWidget):
         _add_del_section("contrast_factors")
         out["contrast_factors"] = {}
 
+        print(
+            "[GUI COUNTS] Serialized Builder input: "
+            f"initial_values="
+            f"{len(out.get('initial_values', {})):,}, "
+            f"refinable_parameters="
+            f"{len(out.get('refinable_parameters', {})):,}, "
+            f"bounds="
+            f"{len(out.get('bounds', {})):,}",
+            flush=True,
+        )
+
+
         return out
 
 
@@ -5442,6 +7807,9 @@ class InputBuilder(QtWidgets.QWidget):
             self._site_use_flags = {}
 
             self._crystallite_shape_spec = {}
+            self._layer_stacking_spec = {}
+            self._stacking_search_spec = {}
+            self._stacking_refinement_spec = {}
             self._loaded_cf_initial = {}
             self._loaded_cf_refinable = {}
             self._loaded_cf_bounds = {}
@@ -5466,4 +7834,118 @@ class InputBuilder(QtWidgets.QWidget):
             self._block = False
         self.changed.emit()
 
+    def _stacking_vector_refinement_from_config(
+        self,
+        initial: Dict[str, Any],
+        refinable: Dict[str, Any],
+        bounds: Dict[str, Any],
+        stacking_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from pdf_fitting.models.layer_stacking import (
+            LayerStackSpec,
+            d02_reference_parameters,
+        )
 
+        try:
+            reference = d02_reference_parameters(
+                LayerStackSpec.from_dict(
+                    stacking_cfg
+                )
+            )
+        except Exception:
+            reference = {
+                "u_ab": 0.0,
+                "v_ab": 0.0,
+                "u_repeat": 0.0,
+                "v_repeat": 0.0,
+                "delta_h": 0.0,
+            }
+
+        reference_by_parameter = {
+            "stack_u_ab": reference["u_ab"],
+            "stack_v_ab": reference["v_ab"],
+            "stack_u_repeat": reference["u_repeat"],
+            "stack_v_repeat": reference["v_repeat"],
+            "stack_delta_h": reference["delta_h"],
+        }
+
+        output = {}
+
+        for parameter_name in STACKING_VECTOR_PARAMETERS:
+            minimum, maximum = (
+                STACKING_VECTOR_DEFAULT_BOUNDS[
+                    parameter_name
+                ]
+            )
+
+            raw_bounds = bounds.get(
+                parameter_name,
+                None,
+            )
+
+            try:
+                if isinstance(
+                    raw_bounds,
+                    (tuple, list),
+                ):
+                    if raw_bounds[0] not in (
+                        None,
+                        "",
+                    ):
+                        minimum = float(
+                            raw_bounds[0]
+                        )
+
+                    if raw_bounds[1] not in (
+                        None,
+                        "",
+                    ):
+                        maximum = float(
+                            raw_bounds[1]
+                        )
+
+                elif raw_bounds:
+                    parts = [
+                        item.strip()
+                        for item in str(
+                            raw_bounds
+                        ).split(
+                            ",",
+                            1,
+                        )
+                    ]
+
+                    if len(parts) == 2:
+                        if parts[0]:
+                            minimum = float(parts[0])
+
+                        if parts[1]:
+                            maximum = float(parts[1])
+
+            except Exception:
+                pass
+
+            output[parameter_name] = {
+                "value": float(
+                    initial.get(
+                        parameter_name,
+                        reference_by_parameter[
+                            parameter_name
+                        ],
+                    )
+                ),
+                "refine": bool(
+                    refinable.get(
+                        parameter_name,
+                        False,
+                    )
+                ),
+                "minimum": float(
+                    minimum
+                ),
+                "maximum": float(
+                    maximum
+                ),
+            }
+
+        return output

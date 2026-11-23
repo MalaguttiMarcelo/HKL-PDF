@@ -1,0 +1,154 @@
+[files]
+structure_file = Pd.cif
+gr_data_file = cylinder_d250_h101.15_Biso0p3_SAXS.xy
+
+[range]
+r_min = 2.0
+r_max = 200.0
+
+[pair_generation]
+r_extension = 1.2
+
+[refinement]
+staged_refinement = false
+microstrain_model = isotropic
+compute_pair_contributions_on_finish = false
+compute_warren_on_finish = false
+compute_local_trends_on_finish = false
+export_finite_coordination = false
+refinement_r_step_final = 0.01
+max_nfev_final = 60
+ftol = 0.001
+xtol = 0.001
+gtol = 0.001
+progress_every_sec = 0.5
+saxs_enabled = true
+saxs_model = same_as_size_model
+saxs_apply_qdamp = false
+saxs_apply_qmax = false
+shell_backend = cpu
+pdf_backend = cpu
+gpu_device = 0
+gpu_memory_fraction = 0.7
+
+[initial_values]
+scale = 0.05001362553532311
+a = 3.8905412375131556
+b = 3.8905412375131556
+c = 3.8905412375131556
+alpha = 90.0
+beta = 90.0
+gamma = 90.0
+x_pd1 = 0.0
+y_pd1 = 0.0
+z_pd1 = 0.0
+occ_pd1 = 1.0
+biso_Pd = 0.3
+qdamp = 0.0
+delta_broad = 0.0
+qmax = 40.0
+qmax_zeros = 5.0
+occ_c = 1.0
+occ_ca = 1.0
+occ_o = 1.0
+x_c = 0.0
+x_ca = 0.0
+x_o = 0.25992
+y_c = 0.0
+y_ca = 0.0
+y_o = 0.0
+z_c = 0.25
+z_ca = 0.0
+z_o = 0.25
+saxs_scale = 1.0
+saxs_diameter = 0.0
+saxs_diameter_std = 0.0
+saxs_height = 0.0
+saxs_height_std = 0.0
+delta_g = 0.0
+
+[refinable_parameters]
+scale = true
+a = true
+b = false
+c = false
+alpha = false
+beta = false
+gamma = false
+x_pd1 = false
+y_pd1 = false
+z_pd1 = false
+occ_pd1 = false
+biso_Pd = false
+qdamp = false
+delta_broad = false
+qmax = false
+qmax_zeros = false
+occ_c = false
+occ_ca = false
+occ_o = false
+x_c = false
+x_ca = false
+x_o = false
+y_c = false
+y_ca = false
+y_o = false
+z_c = false
+z_ca = false
+z_o = false
+saxs_scale = false
+saxs_diameter = false
+saxs_diameter_std = false
+saxs_height = false
+saxs_height_std = false
+delta_g = false
+
+[bounds]
+biso_Pd = 0.0, 10.0
+
+[constraints]
+
+[crystallite_shape]
+mode = finite_shape
+a_max = 8
+a_min = -9
+all_atom_preview_limit = 100000
+apply_shape_preview = false
+axis_h = 0
+axis_k = 0
+axis_l = 1
+b_max = 8
+b_min = -9
+base1_h = 1
+base1_k = 0
+base1_l = 0
+base2_h = 0
+base2_k = 1
+base2_l = 0
+c_max = 3
+c_min = -4
+clip_preview_atoms_to_shape = true
+construction_mode = block
+diameter_angstrom = 250.0
+diameter_cells = 64.286
+diameter_max_cells = 20.0
+diameter_min_cells = 5.0
+fill_shape_with_cells = true
+height_angstrom = 101.15
+height_cells = 26.01
+height_max_cells = 10.0
+height_min_cells = 1.0
+n_scan_candidates = 1
+scan_diameter = false
+scan_height = false
+search_mode = predefined
+shape_opacity = 0.18
+shape_type = disk
+show_all_atoms = true
+show_cell_boxes = false
+show_cell_centers = false
+show_shape_axes = true
+show_shape_surface = true
+show_unit_cell_atoms = true
+step_cells = 1.0
+

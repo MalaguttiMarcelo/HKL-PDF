@@ -24,6 +24,8 @@ from .chemistry import (
 from .display_model import (
     base_site_index,
     build_display_model,
+    primary_site_element,
+    site_species_components,
     visible_periodic_structure,
 )
 
@@ -96,6 +98,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         self.site_styles: Dict[int, Dict[str, Any]] = {}
 
         self.atom_records: List[Dict[str, Any]] = []
+        # {base site index: Cartesian U (3x3, Å²)} of anisotropic atoms.
+        self.adp_u_by_site: Dict[int, np.ndarray] = {}
         self.bond_records: List[Dict[str, Any]] = []
 
         self.atom_actors: List[Any] = []
@@ -199,7 +203,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
 
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
         scroll.setWidget(content)
         outer_layout.addWidget(scroll)
@@ -215,9 +220,12 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Display"
         )
 
-        display_layout = QtWidgets.QFormLayout(
+        display_layout = QtWidgets.QGridLayout(
             display_group
         )
+        display_layout.setContentsMargins(6, 4, 6, 4)
+        display_layout.setHorizontalSpacing(10)
+        display_layout.setVerticalSpacing(2)
 
         self.chk_show_atoms = QtWidgets.QCheckBox(
             "Show atoms"
@@ -249,21 +257,24 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Orthographic projection"
         )
 
-        display_layout.addRow(
-            self.chk_show_atoms
+        self.chk_show_axes.setText("Lattice vectors a, b, c")
+        self.chk_show_labels.setText("Selected-site labels")
+        self.chk_show_atoms.setText("Atoms")
+        self.chk_show_cell.setText("Unit cell")
+        self.chk_orthographic.setText("Orthographic")
+        display_layout.addWidget(self.chk_show_atoms, 0, 0)
+        display_layout.addWidget(self.chk_show_cell, 0, 1)
+        display_layout.addWidget(self.chk_orthographic, 0, 2)
+        display_layout.addWidget(self.chk_show_axes, 1, 0, 1, 2)
+        display_layout.addWidget(self.chk_show_labels, 1, 2)
+        self.chk_adp_ellipsoids = QtWidgets.QCheckBox("Thermal ellipsoids (50 %)")
+        self.chk_adp_ellipsoids.setChecked(True)
+        self.chk_adp_ellipsoids.setToolTip(
+            "Draw anisotropic atoms as 50 % probability displacement ellipsoids "
+            "(from the β parameters of the phase)."
         )
-        display_layout.addRow(
-            self.chk_show_cell
-        )
-        display_layout.addRow(
-            self.chk_show_axes
-        )
-        display_layout.addRow(
-            self.chk_show_labels
-        )
-        display_layout.addRow(
-            self.chk_orthographic
-        )
+        self.chk_adp_ellipsoids.toggled.connect(lambda _on: self._redraw_for_adp())
+        display_layout.addWidget(self.chk_adp_ellipsoids, 3, 0, 1, 3)
 
         self.atom_scale_slider = QtWidgets.QSlider(
             QtCore.Qt.Orientation.Horizontal
@@ -290,18 +301,12 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             self.atom_scale_label
         )
 
-        display_layout.addRow(
-            "Global atom scale:",
-            atom_size_row,
-        )
-
         background_button = QtWidgets.QPushButton(
-            "Choose background color..."
+            "Background…"
         )
-
-        display_layout.addRow(
-            background_button
-        )
+        atom_size_row.insertWidget(0, QtWidgets.QLabel("Atom scale"))
+        atom_size_row.addWidget(background_button)
+        display_layout.addLayout(atom_size_row, 2, 0, 1, 3)
 
         layout.addWidget(
             display_group
@@ -311,9 +316,11 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Displayed supercell"
         )
 
-        supercell_layout = QtWidgets.QFormLayout(
+        supercell_layout = QtWidgets.QGridLayout(
             supercell_group
         )
+        supercell_layout.setContentsMargins(6, 4, 6, 4)
+        supercell_layout.setVerticalSpacing(2)
 
         self.spin_repeat_a = QtWidgets.QSpinBox()
         self.spin_repeat_b = QtWidgets.QSpinBox()
@@ -342,8 +349,18 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         )
 
         self.chk_boundary_images.setToolTip(
-            "Show periodic atoms required at the outer supercell boundaries. "
-            "Periodic bonds crossing the boundary are also displayed."
+            "Show the periodic copies of atoms lying on the cell faces, edges "
+            "and corners (e.g. all 8 corners of a bcc cell)."
+        )
+
+        self.chk_bonded_outside = QtWidgets.QCheckBox(
+            "Add bonded atoms outside the cell"
+        )
+        self.chk_bonded_outside.setChecked(False)
+        self.chk_bonded_outside.setToolTip(
+            "Also draw the neighbours bonded to atoms in the cell that lie "
+            "outside it (completes molecules / coordination polyhedra). "
+            "For metals this adds many atoms around the cell."
         )
 
         repeat_row = QtWidgets.QHBoxLayout()
@@ -369,14 +386,13 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             self.spin_repeat_c
         )
 
-        supercell_layout.addRow(
-            "Repeat counts:",
-            repeat_row,
-        )
-
-        supercell_layout.addRow(
-            self.chk_boundary_images
-        )
+        repeat_row.insertWidget(0, QtWidgets.QLabel("Repeat"))
+        repeat_row.addStretch(1)
+        self.chk_boundary_images.setText("Boundary images")
+        self.chk_bonded_outside.setText("Bonded atoms outside")
+        supercell_layout.addLayout(repeat_row, 0, 0, 1, 2)
+        supercell_layout.addWidget(self.chk_boundary_images, 1, 0)
+        supercell_layout.addWidget(self.chk_bonded_outside, 1, 1)
 
         layout.addWidget(
             supercell_group
@@ -406,42 +422,22 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "View Z"
         )
 
-        camera_layout.addWidget(
-            button_fit,
-            0,
-            0,
-            1,
-            3,
-        )
-        camera_layout.addWidget(
-            button_x,
-            1,
-            0,
-        )
-        camera_layout.addWidget(
-            button_y,
-            1,
-            1,
-        )
-        camera_layout.addWidget(
-            button_z,
-            1,
-            2,
-        )
-        camera_layout.addWidget(
-            button_iso,
-            2,
-            0,
-            1,
-            3,
-        )
+        camera_layout.setContentsMargins(6, 4, 6, 4)
+        camera_layout.setSpacing(3)
+        button_fit.setText("Fit")
+        button_x.setText("X")
+        button_y.setText("Y")
+        button_z.setText("Z")
+        button_iso.setText("Iso")
+        for col, b in enumerate((button_fit, button_x, button_y, button_z, button_iso)):
+            camera_layout.addWidget(b, 0, col)
 
         layout.addWidget(
             camera_group
         )
 
         hkl_group = QtWidgets.QGroupBox(
-            "View along (hkl) plane normal"
+            "View along (hkl) normal"
         )
 
         hkl_layout = QtWidgets.QGridLayout(
@@ -474,50 +470,12 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Apply (hkl) view"
         )
 
-        hkl_layout.addWidget(
-            QtWidgets.QLabel("h"),
-            0,
-            0,
-        )
-        hkl_layout.addWidget(
-            self.spin_h,
-            0,
-            1,
-        )
-        hkl_layout.addWidget(
-            QtWidgets.QLabel("k"),
-            0,
-            2,
-        )
-        hkl_layout.addWidget(
-            self.spin_k,
-            0,
-            3,
-        )
-        hkl_layout.addWidget(
-            QtWidgets.QLabel("l"),
-            0,
-            4,
-        )
-        hkl_layout.addWidget(
-            self.spin_l,
-            0,
-            5,
-        )
-        hkl_layout.addWidget(
-            self.chk_reverse_hkl,
-            1,
-            0,
-            1,
-            6,
-        )
-        hkl_layout.addWidget(
-            button_apply_hkl,
-            2,
-            0,
-            1,
-            6,
-        )
+        hkl_layout.setContentsMargins(6, 4, 6, 4)
+        hkl_layout.setSpacing(3)
+        self.chk_reverse_hkl.setText("Reverse")
+        button_apply_hkl.setText("Apply")
+        for col, w in enumerate((self.spin_h, self.spin_k, self.spin_l, self.chk_reverse_hkl, button_apply_hkl)):
+            hkl_layout.addWidget(w, 0, col)
 
         layout.addWidget(
             hkl_group
@@ -530,6 +488,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         selection_layout = QtWidgets.QVBoxLayout(
             selection_group
         )
+        selection_layout.setContentsMargins(6, 4, 6, 4)
+        selection_layout.setSpacing(3)
 
         self.selection_label = QtWidgets.QLabel(
             "Click an atom to inspect it."
@@ -546,7 +506,7 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
                 background-color: white;
                 border: 1px solid #B0B0B0;
                 border-radius: 3px;
-                padding: 7px;
+                padding: 4px;
             }
             """
         )
@@ -570,9 +530,11 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Configuration and export"
         )
 
-        output_layout = QtWidgets.QVBoxLayout(
+        output_layout = QtWidgets.QGridLayout(
             output_group
         )
+        output_layout.setContentsMargins(6, 4, 6, 4)
+        output_layout.setSpacing(3)
 
         self.button_save_configuration = QtWidgets.QPushButton(
             "Save viewer configuration"
@@ -610,41 +572,22 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             "Renderer / GPU information"
         )
 
-        output_layout.addWidget(
-            self.button_save_configuration
+        self.button_save_configuration.setText("Save view settings")
+        self.button_load_configuration.setText("Load view settings…")
+        button_export_cif.setText("Export CIF…")
+        button_export_xyz.setText("Export XYZ…")
+        button_export_coordination.setText("Export coordination…")
+        button_screenshot.setText("Screenshot…")
+        button_gpu_info.setText("Renderer info")
+        grid_buttons = (
+            self.button_save_configuration, self.button_load_configuration,
+            button_export_cif, button_export_xyz,
+            button_export_coordination, button_screenshot,
+            button_gpu_info,
         )
-
-        output_layout.addWidget(
-            self.button_load_configuration
-        )
-
-        output_layout.addWidget(
-            self.configuration_path_label
-        )
-
-        output_layout.addSpacing(
-            8
-        )
-
-        output_layout.addWidget(
-            button_export_cif
-        )
-
-        output_layout.addWidget(
-            button_export_xyz
-        )
-
-        output_layout.addWidget(
-            button_export_coordination
-        )
-
-        output_layout.addWidget(
-            button_screenshot
-        )
-
-        output_layout.addWidget(
-            button_gpu_info
-        )
+        for i, b in enumerate(grid_buttons):
+            output_layout.addWidget(b, i // 2, i % 2)
+        output_layout.addWidget(self.configuration_path_label, 4, 0, 1, 2)
 
         layout.addWidget(
             output_group
@@ -741,6 +684,10 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         )
 
         self.chk_boundary_images.toggled.connect(
+            self._on_supercell_changed
+        )
+
+        self.chk_bonded_outside.toggled.connect(
             self._on_supercell_changed
         )
 
@@ -1168,18 +1115,28 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             if path.lower().endswith(
                 ".cif"
             ):
-                from pdf_fitting.gui.cif_utils import read_cif_asu_sites
+                from pymatgen.io.cif import CifParser
 
-                structure, _sites = read_cif_asu_sites(
-                    path
+                parser = CifParser(
+                    path,
                 )
+
+                try:
+                    structure = parser.parse_structures(
+                        primitive=False,
+                    )[0]
+
+                except AttributeError:
+                    structure = parser.get_structures(
+                        primitive=False,
+                    )[0]
 
         except Exception:
             structure = None
 
         if structure is None:
             structure = Structure.from_file(
-                path
+                path,
             )
 
         if lattice_params:
@@ -1188,10 +1145,46 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
                 lattice_params,
             )
 
+        self.set_structure(
+            structure,
+            path,
+            input_path=input_path,
+        )
+
+    def update_structure(
+        self,
+        structure: Structure,
+    ) -> None:
+        """
+        Replace the structure keeping styles, selection settings and the
+        camera (same number of sites, e.g. after a refinement).
+        """
+        if self.structure is None or len(structure) != len(self.structure):
+            self.set_structure(
+                structure,
+                self.structure_path or "",
+                input_path=self.input_path,
+            )
+            return
+
+        self.structure = structure
+        self._rebuild_display_model()
+        self._rebuild_scene(
+            reset_camera=False
+        )
+
+    def set_structure(
+        self,
+        structure: Structure,
+        path: str,
+        *,
+        input_path: Optional[str] = None,
+    ) -> None:
+        """Show an already-built structure (e.g. the refined phase)."""
         self.structure = structure
         self.structure_path = os.path.abspath(
             path
-        )
+        ) if path else ""
 
         self.set_input_path(
             input_path
@@ -1237,7 +1230,7 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         lattice = structure.lattice
 
         self.statusBar().showMessage(
-            f"Loaded {len(structure.sites)} base-cell atoms. "
+            f"Loaded {len(structure.sites)} atoms in the conventional unit cell. "
             f"a={lattice.a:.5g}, b={lattice.b:.5g}, c={lattice.c:.5g} Å; "
             f"α={lattice.alpha:.4g}, β={lattice.beta:.4g}, "
             f"γ={lattice.gamma:.4g}°."
@@ -1417,6 +1410,9 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             two_color=bool(
                 self.chk_two_color_bonds.isChecked()
             ),
+            add_bonded_outside=bool(
+                self.chk_bonded_outside.isChecked()
+            ),
         )
 
         self.display_structure = model[
@@ -1500,11 +1496,18 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             float(params.get("gamma", old.gamma)),
         )
 
+        species = [
+            site.species
+            for site in structure.sites
+        ]
+
         return Structure(
             lattice,
-            structure.species,
+            species,
             structure.frac_coords,
             site_properties=structure.site_properties,
+            coords_are_cartesian=False,
+            to_unit_cell=False,
         )
 
     def _initialize_default_styles(self) -> None:
@@ -1514,8 +1517,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         for index, site in enumerate(
             self.structure.sites
         ):
-            symbol = clean_element_symbol(
-                str(site.specie)
+            symbol = primary_site_element(
+                site
             )
 
             self.element_styles.setdefault(
@@ -1543,8 +1546,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
 
         site = self.structure[index]
 
-        symbol = clean_element_symbol(
-            str(site.specie)
+        symbol = primary_site_element(
+            site
         )
 
         style = dict(
@@ -1587,8 +1590,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         if label:
             return str(label)
 
-        symbol = clean_element_symbol(
-            str(site.specie)
+        symbol = primary_site_element(
+            site
         )
 
         return f"{symbol}{index + 1}"
@@ -1607,8 +1610,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             for index, site in enumerate(
                 self.structure.sites
             ):
-                symbol = clean_element_symbol(
-                    str(site.specie)
+                symbol = primary_site_element(
+                    site
                 )
 
                 element_to_indices.setdefault(
@@ -2107,6 +2110,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
 
         if self.chk_show_axes.isChecked():
             self._add_lattice_vectors()
+        else:
+            self._remove_lattice_triad()
 
         if (
             self.chk_show_bonds.isChecked()
@@ -2226,111 +2231,370 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
         self,
     ) -> None:
         """
-        Draw the actual crystallographic direct-lattice vectors a, b and c.
-
-        These replace the Cartesian x, y, z orientation widget.
+        Show the crystallographic axes a, b, c as a small triad in the lower
+        left corner (orientation widget). It rotates with the camera but is
+        drawn apart from the unit cell, like VESTA.
         """
+        self._remove_lattice_triad()
+
         if self.display_structure is None:
             return
+
+        import vtk
 
         matrix = np.asarray(
             self.display_structure.lattice.matrix,
             dtype=float,
         )
+        lengths = np.linalg.norm(matrix, axis=1)
+
+        if np.any(lengths <= 1.0e-12):
+            return
+
+        unit = matrix / lengths[:, None]
+
+        axes = vtk.vtkAxesActor()
+        axes.SetXAxisLabelText("a")
+        axes.SetYAxisLabelText("b")
+        axes.SetZAxisLabelText("c")
+        axes.SetShaftTypeToCylinder()
+        axes.SetCylinderRadius(0.035)
+        axes.SetConeRadius(0.45)
+        axes.SetTotalLength(1.0, 1.0, 1.0)
+
+        # Columns of the transform = unit lattice vectors, so the triad shows
+        # the true (possibly oblique) directions of a, b and c.
+        m = vtk.vtkMatrix4x4()
+        for i in range(3):
+            for j in range(3):
+                m.SetElement(i, j, float(unit[j, i]))
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(m)
+        axes.SetUserTransform(transform)
 
         colors = {
-            "a": "#E53935",
-            "b": "#43A047",
-            "c": "#1E5BFF",
+            "a": (0.898, 0.224, 0.208),
+            "b": (0.263, 0.627, 0.278),
+            "c": (0.118, 0.357, 1.0),
         }
+        text_color = self._triad_text_color()
 
-        label_points = []
-        label_text = []
-
-        for index, label in enumerate(
-            (
-                "a",
-                "b",
-                "c",
-            )
+        for label, shaft, tip, caption in (
+            ("a", axes.GetXAxisShaftProperty(), axes.GetXAxisTipProperty(), axes.GetXAxisCaptionActor2D()),
+            ("b", axes.GetYAxisShaftProperty(), axes.GetYAxisTipProperty(), axes.GetYAxisCaptionActor2D()),
+            ("c", axes.GetZAxisShaftProperty(), axes.GetZAxisTipProperty(), axes.GetZAxisCaptionActor2D()),
         ):
-            vector = np.asarray(
-                matrix[index],
-                dtype=float,
-            )
+            shaft.SetColor(*colors[label])
+            tip.SetColor(*colors[label])
+            text = caption.GetCaptionTextProperty()
+            text.SetColor(*text_color)
+            text.SetBold(True)
+            text.SetItalic(False)
+            text.SetShadow(False)
+            text.SetFontSize(20)
 
-            length = float(
-                np.linalg.norm(
-                    vector
+        # Small sphere at the origin of the triad.
+        sphere_source = vtk.vtkSphereSource()
+        sphere_source.SetRadius(0.11)
+        sphere_source.SetThetaResolution(24)
+        sphere_source.SetPhiResolution(18)
+        sphere_mapper = vtk.vtkPolyDataMapper()
+        sphere_mapper.SetInputConnection(sphere_source.GetOutputPort())
+        sphere = vtk.vtkActor()
+        sphere.SetMapper(sphere_mapper)
+        sphere.GetProperty().SetColor(0.78, 0.78, 0.80)
+        sphere.GetProperty().SetSpecular(0.5)
+
+        # vtkPropAssembly keeps the 2D a/b/c captions (vtkAssembly drops them).
+        marker = vtk.vtkPropAssembly()
+        marker.AddPart(axes)
+        marker.AddPart(sphere)
+
+        try:
+            self._lattice_triad = self.plotter.add_orientation_widget(
+                marker,
+                interactive=False,
+                viewport=(0.0, 0.0, 0.24, 0.3),
+            )
+        except Exception:
+            self._lattice_triad = None
+
+    def _triad_text_color(self):
+        try:
+            background = np.asarray(
+                self.plotter.background_color,
+                dtype=float,
+            )[:3]
+            if float(np.mean(background)) < 0.45:
+                return (0.92, 0.92, 0.92)
+        except Exception:
+            pass
+        return (0.1, 0.1, 0.1)
+
+    def _remove_lattice_triad(
+        self,
+    ) -> None:
+        widget = getattr(
+            self,
+            "_lattice_triad",
+            None,
+        )
+
+        if widget is not None:
+            try:
+                widget.EnabledOff()
+                widget.SetInteractor(None)
+            except Exception:
+                pass
+
+        self._lattice_triad = None
+
+    def _add_occupancy_sphere(
+        self,
+        record: Dict[str, Any],
+        radius: float,
+    ) -> None:
+        """
+        Render one partially occupied or mixed-occupancy atomic site.
+
+        Each chemical component occupies a proportional azimuthal sector of
+        the sphere surface. Missing occupancy is rendered in gray.
+
+        Examples:
+            N occupancy 0.575:
+                blue N sector = 57.5 %
+                gray vacancy sector = 42.5 %
+
+            Fe 0.70 + Co 0.30:
+                Fe-colored sector = 70 %
+                Co-colored sector = 30 %
+        """
+        center = np.asarray(
+            record.get(
+                "position",
+                [0.0, 0.0, 0.0],
+            ),
+            dtype=float,
+        )
+
+        components = list(
+            record.get(
+                "occupancy_components",
+                [],
+            )
+            or []
+        )
+
+        if not components:
+            components = [
+                {
+                    "element": record.get(
+                        "element",
+                        "X",
+                    ),
+                    "occupancy": 1.0,
+                }
+            ]
+
+        cleaned_components = []
+
+        for component in components:
+            element = clean_element_symbol(
+                component.get(
+                    "element",
+                    "X",
                 )
             )
 
-            if length <= 1.0e-12:
-                continue
+            try:
+                occupancy = float(
+                    component.get(
+                        "occupancy",
+                        0.0,
+                    )
+                )
+            except Exception:
+                occupancy = 0.0
 
-            arrow = self.pv.Arrow(
-                start=np.zeros(
-                    3,
-                    dtype=float,
+            occupancy = max(
+                0.0,
+                min(
+                    1.0,
+                    occupancy,
                 ),
-                direction=vector,
-                tip_length=0.16,
-                tip_radius=0.06,
-                shaft_radius=0.018,
-                scale="auto",
             )
 
-            actor = self.plotter.add_mesh(
-                arrow,
-                color=colors[label],
-                smooth_shading=True,
-                ambient=0.25,
-                diffuse=0.75,
-                specular=0.25,
-                specular_power=20.0,
-                pickable=False,
-                name=f"lattice_vector_{label}",
-                render=False,
+            if occupancy > 1.0e-8:
+                cleaned_components.append(
+                    {
+                        "element": element,
+                        "occupancy": occupancy,
+                        "color": element_color(element),
+                    }
+                )
+
+        total_occupancy = sum(
+            float(component["occupancy"])
+            for component in cleaned_components
+        )
+
+        # Add a VESTA-style gray vacancy sector when the site is not fully
+        # occupied. For example: N0.575 -> N blue + vacancy gray.
+        if total_occupancy < 1.0 - 1.0e-8:
+            cleaned_components.append(
+                {
+                    "element": "Vacancy",
+                    "occupancy": 1.0 - total_occupancy,
+                    "color": "#B5B5B5",
+                }
             )
 
-            self.cell_actors.append(
-                actor
+        # Safety fallback.
+        if not cleaned_components:
+            cleaned_components = [
+                {
+                    "element": "X",
+                    "occupancy": 1.0,
+                    "color": "#808080",
+                }
+            ]
+
+        # Normalize in case of CIF numerical rounding.
+        occupancy_sum = sum(
+            float(component["occupancy"])
+            for component in cleaned_components
+        )
+
+        for component in cleaned_components:
+            component["fraction"] = (
+                float(component["occupancy"])
+                / max(
+                    occupancy_sum,
+                    1.0e-12,
+                )
             )
 
-            label_points.append(
-                1.08 * vector
+        sphere = self.pv.Sphere(
+            radius=float(radius),
+            center=center,
+            theta_resolution=36,
+            phi_resolution=24,
+        )
+
+        cell_centers = np.asarray(
+            sphere.cell_centers().points,
+            dtype=float,
+        )
+
+        vectors = cell_centers - center[None, :]
+
+        angles = np.arctan2(
+            vectors[:, 1],
+            vectors[:, 0],
+        )
+
+        # Convert angle range from [-pi, pi] into [0, 1].
+        fractions = (
+            angles
+            + np.pi
+        ) / (
+            2.0
+            * np.pi
+        )
+
+        rgb = np.zeros(
+            (
+                sphere.n_cells,
+                3,
+            ),
+            dtype=np.uint8,
+        )
+
+        cumulative = 0.0
+
+        for component_index, component in enumerate(
+            cleaned_components
+        ):
+            fraction = float(
+                component["fraction"]
             )
 
-            label_text.append(
-                label
+            upper = cumulative + fraction
+
+            if component_index == len(cleaned_components) - 1:
+                mask = fractions >= cumulative
+            else:
+                mask = (
+                    (fractions >= cumulative)
+                    & (fractions < upper)
+                )
+
+            qcolor = QtGui.QColor(
+                str(
+                    component["color"]
+                )
             )
 
-        if label_points:
-            actor = self.plotter.add_point_labels(
-                np.asarray(
-                    label_points,
-                    dtype=float,
-                ),
-                label_text,
-                font_size=18,
-                text_color="#202020",
-                point_size=0,
-                shape=None,
-                always_visible=True,
-                name="lattice_vector_labels",
-                render=False,
-            )
+            rgb[
+                mask,
+                0,
+            ] = qcolor.red()
 
-            self.label_actors.append(
-                actor
-            )
+            rgb[
+                mask,
+                1,
+            ] = qcolor.green()
+
+            rgb[
+                mask,
+                2,
+            ] = qcolor.blue()
+
+            cumulative = upper
+
+        sphere.cell_data[
+            "rgb"
+        ] = rgb
+
+        actor = self.plotter.add_mesh(
+            sphere,
+            scalars="rgb",
+            rgb=True,
+            preference="cell",
+            opacity=float(
+                record.get(
+                    "opacity",
+                    1.0,
+                )
+            ),
+            smooth_shading=True,
+            ambient=0.10,
+            diffuse=0.78,
+            specular=0.70,
+            specular_power=55.0,
+            show_edges=False,
+            pickable=True,
+            name=(
+                "occupancy_atom_"
+                f"{record.get('key', '')}"
+            ),
+            render=False,
+        )
+
+        self.atom_actors.append(
+            actor
+        )
 
 
     def _add_atoms(
         self,
     ) -> None:
         """
-        Render the complete displayed supercell, including optional boundary images.
+        Render all visible atoms.
+
+        Fully occupied single-species sites are batched into glyph groups for
+        speed. Partial-occupancy and mixed/antisite sites are rendered as
+        individual VESTA-like colored occupancy spheres.
         """
         self.atom_records = []
 
@@ -2338,6 +2602,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             Tuple[Any, ...],
             List[Dict[str, Any]],
         ] = {}
+
+        partial_records: List[Dict[str, Any]] = []
 
         global_scale = (
             float(
@@ -2372,6 +2638,42 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             self.atom_records.append(
                 record
             )
+            if self._adp_ellipsoid_for(record) is not None:
+                continue  # drawn as an ellipsoid below
+
+            components = list(
+                record.get(
+                    "occupancy_components",
+                    [],
+                )
+                or []
+            )
+
+            total_occupancy = 0.0
+
+            for component in components:
+                try:
+                    total_occupancy += float(
+                        component.get(
+                            "occupancy",
+                            0.0,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            is_mixed_site = len(components) > 1
+
+            is_partial_site = (
+                abs(total_occupancy - 1.0)
+                > 1.0e-6
+            )
+
+            if is_mixed_site or is_partial_site:
+                partial_records.append(
+                    record
+                )
+                continue
 
             group_key = (
                 str(
@@ -2404,6 +2706,7 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
                 record
             )
 
+        # Render normal fully occupied sites in batches.
         for group_index, (
             group_key,
             records,
@@ -2458,7 +2761,93 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             self.atom_actors.append(
                 actor
             )
-            
+
+        # Render partial occupancies / antisites as color-segmented spheres.
+        for record in partial_records:
+            self._add_occupancy_sphere(
+                record,
+                float(
+                    record.get(
+                        "radius",
+                        0.4,
+                    )
+                ),
+            )
+
+        self._add_adp_ellipsoids()
+
+    # ------------------------------------------------------------------
+    # Anisotropic displacement ellipsoids
+    # ------------------------------------------------------------------
+    ADP_P50 = 1.5382  # radius factor of the 50 % probability ellipsoid
+
+    def set_adp_ellipsoids(self, u_by_site: Dict[int, Any]) -> None:
+        """{base site index: Cartesian U (Å²)}; redraws the atoms."""
+        self.adp_u_by_site = {int(k): np.asarray(v, dtype=float) for k, v in (u_by_site or {}).items()}
+        self._redraw_for_adp()
+
+    def _redraw_for_adp(self) -> None:
+        try:
+            if getattr(self, "display_atom_records", None):
+                for actor in list(getattr(self, "atom_actors", []) or []):
+                    try:
+                        self.plotter.remove_actor(actor, render=False)
+                    except Exception:
+                        pass
+                self.atom_actors = []
+                for name in ("adp_ellipsoids",):
+                    try:
+                        self.plotter.remove_actor(name, render=False)
+                    except Exception:
+                        pass
+                self._add_atoms()
+                self.plotter.render()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ADP] ellipsoid redraw failed: {exc}")
+
+    def _adp_ellipsoid_for(self, record):
+        if not self.adp_u_by_site or not getattr(self, "chk_adp_ellipsoids", None) or not self.chk_adp_ellipsoids.isChecked():
+            return None
+        try:
+            return self.adp_u_by_site.get(int(record.get("base_site_index", -1)))
+        except (TypeError, ValueError):
+            return None
+
+    def _add_adp_ellipsoids(self) -> None:
+        if not self.adp_u_by_site or not self.chk_adp_ellipsoids.isChecked():
+            return
+        unit = self.pv.Sphere(radius=1.0, theta_resolution=24, phi_resolution=16)
+        base = np.asarray(unit.points, dtype=float)
+        meshes = []
+        for record in self.atom_records:
+            U = self._adp_ellipsoid_for(record)
+            if U is None:
+                continue
+            w, V = np.linalg.eigh(0.5 * (U + U.T))
+            radii = self.ADP_P50 * np.sqrt(np.clip(w, 1e-8, None))
+            M = V * radii  # columns: principal axes scaled
+            mesh = unit.copy()
+            mesh.points = base @ M.T + np.asarray(record["position"], dtype=float)
+            color = self.pv.Color(str(record.get("color", "#808080"))).int_rgb
+            mesh.point_data["rgb"] = np.tile(np.asarray(color, dtype=np.uint8), (mesh.n_points, 1))
+            meshes.append(mesh)
+        if not meshes:
+            return
+        merged = meshes[0].merge(meshes[1:]) if len(meshes) > 1 else meshes[0]
+        actor = self.plotter.add_mesh(
+            merged,
+            scalars="rgb",
+            rgb=True,
+            smooth_shading=True,
+            ambient=0.18,
+            diffuse=0.78,
+            specular=0.5,
+            pickable=True,
+            name="adp_ellipsoids",
+            render=False,
+        )
+        self.atom_actors.append(actor)
+
     def _make_bond_tube(
         self,
         start,
@@ -2814,11 +3203,28 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             ):
                 coordination += 1
 
+        occupancy_components = list(
+            record.get(
+                "occupancy_components",
+                [],
+            )
+            or []
+        )
+
+        occupancy_text = ", ".join(
+            [
+                f"{component.get('element', 'X')}="
+                f"{float(component.get('occupancy', 0.0)):.4f}"
+                for component in occupancy_components
+            ]
+        )
+
         self.selection_label.setText(
             "\n".join(
                 [
                     f"Site: {record.get('label', '')}",
                     f"Element: {record.get('element', 'X')}",
+                    f"Occupancy: {occupancy_text}",
                     (
                         "Fractional in displayed supercell: "
                         f"({fractional[0]:.6f}, "
@@ -2876,8 +3282,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
             self.selected_site_index
         ]
 
-        symbol = clean_element_symbol(
-            str(site.specie)
+        symbol = primary_site_element(
+            site
         )
 
         fractional = np.asarray(
@@ -2945,6 +3351,130 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
                 pass
 
         self.highlight_actors = []
+
+    def highlight_records(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        connect: bool = True,
+    ) -> None:
+        """
+        Highlight several displayed atoms (e.g. a picked pair) and, when
+        ``connect`` is True, join consecutive ones with a dashed line labelled
+        with their distance.
+        """
+        self._clear_highlight()
+
+        if not records:
+            self.plotter.render()
+            return
+
+        global_scale = (
+            float(
+                self.atom_scale_slider.value()
+            )
+            / 100.0
+        )
+
+        colors = ["#FFD400", "#FF8A00", "#E040FB"]
+        actors = []
+        positions = []
+
+        for index, record in enumerate(records):
+            center = np.asarray(
+                record.get("position", [0.0, 0.0, 0.0]),
+                dtype=float,
+            )
+            positions.append(center)
+            # Displayed records already include the global atom scale.
+            radius = float(record.get("radius", 0.4 * global_scale)) * 1.35
+            color = colors[index % len(colors)]
+            halo = self.pv.Sphere(
+                radius=radius,
+                center=center,
+                theta_resolution=40,
+                phi_resolution=32,
+            )
+            actors.append(
+                self.plotter.add_mesh(
+                    halo,
+                    color=color,
+                    opacity=0.45,
+                    smooth_shading=True,
+                    specular=0.4,
+                    pickable=False,
+                    render=False,
+                )
+            )
+            # A light, coarse cage in the same colour so the halo reads as a
+            # selection even against similarly coloured atoms.
+            cage = self.pv.Sphere(
+                radius=radius * 1.02,
+                center=center,
+                theta_resolution=14,
+                phi_resolution=10,
+            )
+            actors.append(
+                self.plotter.add_mesh(
+                    cage,
+                    style="wireframe",
+                    color=color,
+                    opacity=0.9,
+                    line_width=1.2,
+                    pickable=False,
+                    render=False,
+                )
+            )
+
+        if connect and len(positions) >= 2:
+            label_points = []
+            label_text = []
+
+            for start, end in zip(positions[:-1], positions[1:]):
+                n_dash = 14
+                points = []
+                lines = []
+                for k in range(n_dash):
+                    t0 = k / n_dash
+                    t1 = (k + 0.55) / n_dash
+                    points.append(start + t0 * (end - start))
+                    points.append(start + t1 * (end - start))
+                    lines.append([2, 2 * k, 2 * k + 1])
+                dashes = self.pv.PolyData(
+                    np.asarray(points, dtype=float),
+                    lines=np.asarray(lines, dtype=np.int64).ravel(),
+                )
+                actors.append(
+                    self.plotter.add_mesh(
+                        dashes,
+                        color="#7C3AED",
+                        line_width=4.0,
+                        render_lines_as_tubes=True,
+                        pickable=False,
+                        render=False,
+                    )
+                )
+                label_points.append(0.5 * (start + end))
+                label_text.append(f"{float(np.linalg.norm(end - start)):.3f} Å")
+
+            actors.append(
+                self.plotter.add_point_labels(
+                    np.asarray(label_points, dtype=float),
+                    label_text,
+                    font_size=14,
+                    text_color="#4C1D95",
+                    point_size=0,
+                    shape="rounded_rect",
+                    shape_color="#F3E8FF",
+                    shape_opacity=0.85,
+                    always_visible=True,
+                    pickable=False,
+                    render=False,
+                )
+            )
+
+        self.highlight_actors = actors
+        self.plotter.render()
 
     def _highlight_atom_record(
         self,
@@ -3116,8 +3646,8 @@ class StructureStudioWindow(QtWidgets.QMainWindow):
 
         elements = sorted(
             {
-                clean_element_symbol(
-                    str(site.specie)
+                primary_site_element(
+                    site
                 )
                 for site in self.structure.sites
             }

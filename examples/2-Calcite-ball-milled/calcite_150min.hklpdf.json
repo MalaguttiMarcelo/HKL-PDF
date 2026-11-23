@@ -1,0 +1,420 @@
+{
+  "format": "hkl-pdf-project",
+  "version": 1,
+  "name": "Calcite_150min",
+  "refinement": {
+    "profile_pdf": true,
+    "profile_pdf_every": true,
+    "staged_refinement": false,
+    "refinement_r_step_final": 0.01,
+    "max_nfev_final": 60,
+    "ftol": 0.001,
+    "xtol": 0.001,
+    "gtol": 0.001,
+    "progress_every_sec": 0.5,
+    "compute_pair_contributions_on_finish": true,
+    "compute_warren_on_finish": true,
+    "compute_local_trends_on_finish": true,
+    "export_finite_coordination": false,
+    "shell_backend": "cpu",
+    "pdf_backend": "cpu",
+    "gpu_device": false,
+    "gpu_memory_fraction": 0.7,
+    "numba_threads": 16,
+    "stochastic_topology_workers": false,
+    "stochastic_collapse_realizations": true,
+    "stochastic_deduplicate_paths": true
+  },
+  "constraints": {},
+  "datasets": [
+    {
+      "id": "ds1",
+      "name": "5-CaCO3-150min.integrated.subtracted_bkg.corr.2th.qmax20",
+      "data_file": "5-CaCO3-150min.integrated.subtracted_bkg.corr.2th.qmax20.xy",
+      "r_min": 2.0,
+      "r_max": 150.0,
+      "r_extension": 1.2,
+      "parameters": {
+        "qdamp": {
+          "value": 0.00787114336321576
+        },
+        "delta_broad": {
+          "value": 0.0014837841765491856
+        },
+        "qmax": {
+          "value": 20.0
+        },
+        "qmax_zeros": {
+          "value": 5.0
+        }
+      },
+      "phases": [
+        {
+          "id": "calcite",
+          "name": "Calcite",
+          "cif": "Calcite.cif",
+          "active": true,
+          "settings": {
+            "microstrain_model": "pah",
+            "saxs_enabled": false,
+            "saxs_model": "sphere",
+            "saxs_apply_qdamp": false,
+            "saxs_apply_qmax": true,
+            "occ_min": 0.0,
+            "occ_max": 1.0,
+            "xyz_max_shift": 0.3
+          },
+          "parameters": {
+            "scale": {
+              "value": 0.10741080268652378,
+              "refine": true
+            },
+            "a": {
+              "value": 4.987094069454196,
+              "refine": true
+            },
+            "b": {
+              "value": 4.987094069454196
+            },
+            "c": {
+              "value": 17.07174683596817,
+              "refine": true
+            },
+            "alpha": {
+              "value": 90.0
+            },
+            "beta": {
+              "value": 90.0
+            },
+            "gamma": {
+              "value": 120.0
+            },
+            "pah_a": {
+              "value": 0.00012051111330482501,
+              "refine": true,
+              "min": 0.0,
+              "max": 0.001
+            },
+            "pah_b": {
+              "value": 0.0
+            },
+            "fe": {
+              "value": 1.0
+            },
+            "x_ca": {
+              "value": 0.0
+            },
+            "y_ca": {
+              "value": 0.0
+            },
+            "z_ca": {
+              "value": 0.0
+            },
+            "occ_ca": {
+              "value": 1.0
+            },
+            "x_c": {
+              "value": 0.0
+            },
+            "y_c": {
+              "value": 0.0
+            },
+            "z_c": {
+              "value": 0.25
+            },
+            "occ_c": {
+              "value": 1.0
+            },
+            "x_o": {
+              "value": 0.2553659028507783,
+              "refine": true
+            },
+            "y_o": {
+              "value": 0.0
+            },
+            "z_o": {
+              "value": 0.25
+            },
+            "occ_o": {
+              "value": 1.0
+            },
+            "occ_fe1": {
+              "value": 1.0
+            },
+            "x_fe1": {
+              "value": 0.0
+            },
+            "y_fe1": {
+              "value": 0.0
+            },
+            "z_fe1": {
+              "value": 0.0
+            },
+            "delta2_ca-o": {
+              "value": 1.9999999998441844,
+              "refine": true,
+              "min": 0.0,
+              "max": 2.0
+            },
+            "occ_pd1": {
+              "value": 1.0
+            },
+            "x_pd1": {
+              "value": 0.0
+            },
+            "y_pd1": {
+              "value": 0.0
+            },
+            "z_pd1": {
+              "value": 0.0
+            },
+            "d": {
+              "value": 54.287537579204155,
+              "refine": true,
+              "min": 0.0
+            },
+            "d_std": {
+              "value": 29.839982045021447,
+              "refine": true
+            },
+            "biso_C": {
+              "value": 2.1066626854093333,
+              "min": 0.0,
+              "max": 10.0
+            },
+            "biso_Ca": {
+              "value": 1.0631481145590358,
+              "min": 0.0,
+              "max": 10.0
+            },
+            "biso_O": {
+              "value": 2.5279995089269156,
+              "min": 0.0,
+              "max": 10.0
+            },
+            "EdgeE1": {
+              "value": -0.3046737569636874,
+              "refine": true
+            },
+            "EdgeE2": {
+              "value": -0.15575009953188798,
+              "refine": true
+            },
+            "EdgeE3": {
+              "value": 0.03399696046823324,
+              "refine": true
+            },
+            "EdgeE4": {
+              "value": -1.3716202502627524,
+              "refine": true
+            },
+            "ScrewE1": {
+              "value": 0.0
+            },
+            "ScrewE2": {
+              "value": 0.0
+            },
+            "ScrewE3": {
+              "value": 0.0
+            },
+            "ScrewE4": {
+              "value": 0.0
+            },
+            "lambda_c-c_0": {
+              "value": 0.096,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-c_1": {
+              "value": 0.365,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-c_2": {
+              "value": 0.069,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-c_3": {
+              "value": 0.071,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-c_4": {
+              "value": 0.071,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-c_5": {
+              "value": 0.022,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_0": {
+              "value": 0.414,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_1": {
+              "value": 0.16,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_2": {
+              "value": 0.224,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_3": {
+              "value": 0.153,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_4": {
+              "value": 0.161,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_5": {
+              "value": 0.046,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-ca_6": {
+              "value": 0.176,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-o_0": {
+              "value": 0.962,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-o_1": {
+              "value": -0.066,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-o_2": {
+              "value": 0.529,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-o_3": {
+              "value": 0.299,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_c-o_4": {
+              "value": -0.019,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_0": {
+              "value": 0.521,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_1": {
+              "value": 0.189,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_2": {
+              "value": 0.309,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_3": {
+              "value": 0.21,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_4": {
+              "value": 0.209,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_5": {
+              "value": 0.259,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-ca_6": {
+              "value": 0.148,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_0": {
+              "value": 0.835637740519173,
+              "refine": true,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_1": {
+              "value": -0.401,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_2": {
+              "value": 0.637,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_3": {
+              "value": 0.138,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_4": {
+              "value": 0.103,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_ca-o_5": {
+              "value": 0.157,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_o-o_0": {
+              "value": 0.949,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_o-o_1": {
+              "value": -0.315,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_o-o_2": {
+              "value": -0.216,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_o-o_3": {
+              "value": 0.666,
+              "min": -1.0,
+              "max": 1.0
+            },
+            "lambda_o-o_4": {
+              "value": 0.28044,
+              "min": -1.0,
+              "max": 1.0
+            }
+          },
+          "sections": {
+            "crystallite_shape": {
+              "mode": "conventional"
+            },
+            "stacking_refinement": {
+              "treatment": "fixed",
+              "transitions": [],
+              "stochastic_vectors": {}
+            }
+          },
+          "extra": {}
+        }
+      ]
+    }
+  ]
+}

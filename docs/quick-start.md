@@ -30,23 +30,31 @@ also be used.
 python -m pdf_fitting.gui
 ```
 
-## 4. Create an input file
+The project window opens. See [Graphical interface](gui.md) for its layout.
 
-In the **Builder** tab:
+## 4. Create a project
 
-1. select the structure file;
-2. select the experimental $G(r)$ file;
-3. enter `r_min` and `r_max`;
-4. choose the crystallite-size model;
-5. choose the microstrain model;
-6. enter initial parameter values;
-7. select the parameters to refine;
-8. assign physically meaningful bounds;
-9. save the input file.
+1. Click **+ Dataset** and select the experimental $G(r)$ file.
+2. Click **+ Phase (CIF)** and select the structure file. Add more phases
+   the same way for a mixture.
+3. In **Data & range**, enter $r_\mathrm{min}$ and $r_\mathrm{max}$.
+4. In **Instrument**, enter `qmax` from the data reduction and a starting
+   `qdamp`.
+5. On the phase pages, choose the size model, the microstrain model, and
+   the starting values.
+6. Tick **Refine** for the parameters to refine and give them physically
+   meaningful bounds.
+7. Save the project (**Ctrl+S**) as a `.json` file next to the data.
+
+An existing single-phase `.inp` file can be opened directly with **Open…**,
+or added as a phase with **+ Phase from .inp**.
+
+To try a ready-made project, open
+`examples/1-FeCr-ball-milled/input_fecr_paper_2.hklpdf.json`.
 
 ## 5. Calculate the initial model
 
-Click **Calculate** before starting a refinement.
+Click **Calculate** (F5) before starting a refinement.
 
 This performs one PDF calculation without changing the parameters. Check:
 
@@ -71,12 +79,8 @@ A recommended order is:
 6. microstrain parameters;
 7. contrast-factor coefficients only when physically justified.
 
-Enable staged refinement with:
-
-```ini
-[refinement]
-staged_refinement = true
-```
+Click **Refine** (F6) to start. Staged refinement can be turned on in
+**Refinement settings**.
 
 ## 7. Inspect the result
 
@@ -88,9 +92,13 @@ After refinement, inspect:
 - parameters that reached their bounds;
 - the physical plausibility of the result;
 - pair contributions, if calculated;
-- Warren and local-dynamics plots, if requested.
+- Warren and local-dynamics plots, if requested;
+- the [esds and correlation matrix](uncertainties.md), if requested.
 
-## Minimal input
+## Minimal `.inp` input
+
+The classic window and older workflows use INI-style `.inp` files. A minimal
+example:
 
 ```ini
 [files]

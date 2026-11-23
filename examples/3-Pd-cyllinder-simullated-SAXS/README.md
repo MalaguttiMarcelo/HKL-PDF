@@ -13,29 +13,16 @@ dimensions of approximately 250 Å in diameter and 101.15 Å in height. The
 values in the input file are the current fitting values and may differ from
 the nominal dimensions.
 
-## Required files
+## Files
 
-The input currently refers to:
+| File | Contents |
+|---|---|
+| `Pd.cif` | FCC Pd structure |
+| `cylinder_d250_h101.15_Biso0p3_SAXS.xy` | Simulated $G(r)$ |
+| `Pd_cylinder_d250_h101.15_Biso0p3_SAXS.inp` | Conventional cylinder/disk model |
+| `Pd_cylinder_d250_h101.15_Biso0p3_SAXS_finite_size.inp` | Explicit finite disk with the SAXS term |
 
-```text
-config/Pd.cif
-data/cylinder_d250_h101.15_Biso0p3_SAXS.xy
-```
-
-Before running the example, update the paths in `[files]` if the repository is
-stored in a different location.
-
-For a portable repository layout, relative paths are recommended. For example,
-if the input file is inside an example subdirectory:
-
-```ini
-[files]
-structure_file = ../../config/Pd.cif
-gr_data_file = ../../data/cylinder_d250_h101.15_Biso0p3_SAXS.xy
-```
-
-Adjust the number of `../` components to match the actual location of the
-example input file.
+All paths are relative, so the example runs from any location.
 
 ## Model summary
 

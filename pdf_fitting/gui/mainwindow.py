@@ -1,13 +1,32 @@
 from __future__ import annotations
 
-import re
-import time
+import json
 import os
+import re
 import tempfile
+import time
 from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
+
+from .cs_results import (
+    CSResultsExplorer,
+    _float_value,
+)
+
+
+# IMPORTANT:
+# Import Pymatgen once on the GUI/main thread before background workers start.
+#
+# Without this preload, clicking "Build crystallite shape..." while the
+# background model-preparation worker imports Pymatgen can cause a Python
+# import-lock deadlock:
+#
+#     _ModuleLock('pymatgen.core.structure')
+#
+# The alias is intentional: this import is only for safe initialization.
+from pymatgen.core import Structure as _PymatgenStructurePreload
 from PySide6.QtGui import QShortcut, QKeySequence, QColor
 from PySide6.QtCore import Qt
 
@@ -209,6 +228,348 @@ def standard_pair_color(pair: str, fallback_index: int = 0) -> str:
         return _blend_hex_colors(ca, cb)
 
     return _COLOR_CYCLE[fallback_index % len(_COLOR_CYCLE)]
+
+def _apply_best_stacking_candidate_to_parser(
+    cfg_raw,
+    best: Dict[str, Any],
+) -> None:
+    """
+    Apply the selected stacking-search candidate to a ConfigParser object.
+
+    This saves:
+
+        stacking distance;
+        repeat-translation u and v, or selected sequence-row u and v;
+        fixed stacking-search treatment;
+        non-refinable stacking distance after selection.
+    """
+    for section_name in (
+        "initial_values",
+        "refinable_parameters",
+        "bounds",
+        "layer_stacking",
+        "stacking_search",
+    ):
+        if not cfg_raw.has_section(
+            section_name
+        ):
+            cfg_raw.add_section(
+                section_name
+            )
+
+    # ---------------------------------------------------------
+    # Save selected stochastic P(alternate), if this candidate
+    # came from correlated A/B stacking.
+    # ---------------------------------------------------------
+    best_p_alternate = best.get(
+        "p_alternate",
+        None,
+    )
+
+    try:
+        best_p_alternate = float(
+            best_p_alternate
+        )
+    except Exception:
+        best_p_alternate = None
+
+    if (
+        best_p_alternate is not None
+        and np.isfinite(
+            best_p_alternate
+        )
+    ):
+        cfg_raw.set(
+            "layer_stacking",
+            "p_alternate",
+            str(
+                best_p_alternate
+            ),
+        )
+
+        # Once a best P_alt is selected, stop scanning it.
+        cfg_raw.set(
+            "layer_stacking",
+            "p_grid_enabled",
+            "false",
+        )
+
+
+    best_spacing = best.get(
+        "stacking_distance",
+        best.get(
+            "stacking_distance_grid",
+            None,
+        ),
+    )
+
+    try:
+        best_spacing = float(
+            best_spacing
+        )
+    except Exception:
+        best_spacing = None
+
+    if (
+        best_spacing is not None
+        and np.isfinite(
+            best_spacing
+        )
+        and best_spacing > 0.0
+    ):
+        cfg_raw.set(
+            "layer_stacking",
+            "nominal_spacing",
+            str(
+                best_spacing
+            ),
+        )
+
+        cfg_raw.set(
+            "layer_stacking",
+            "refine_nominal_spacing",
+            "false",
+        )
+
+        cfg_raw.set(
+            "initial_values",
+            "stacking_distance",
+            str(
+                best_spacing
+            ),
+        )
+
+        cfg_raw.set(
+            "refinable_parameters",
+            "stacking_distance",
+            "false",
+        )
+
+    best_u = best.get(
+        "stacking_u",
+        None,
+    )
+
+    best_v = best.get(
+        "stacking_v",
+        None,
+    )
+
+    try:
+        best_u = float(
+            best_u
+        )
+    except Exception:
+        best_u = None
+
+    try:
+        best_v = float(
+            best_v
+        )
+    except Exception:
+        best_v = None
+
+    lateral_target = str(
+        cfg_raw.get(
+            "stacking_search",
+            "lateral_target",
+            fallback="repeat_translation",
+        )
+        or "repeat_translation"
+    ).strip().lower()
+
+    if lateral_target == "sequence_row":
+        sequence_row = cfg_raw.getint(
+            "stacking_search",
+            "sequence_row",
+            fallback=0,
+        )
+
+        sequence_text = cfg_raw.get(
+            "layer_stacking",
+            "sequence_json",
+            fallback="[]",
+        )
+
+        try:
+            sequence = json.loads(
+                sequence_text
+            )
+        except Exception:
+            sequence = []
+
+        if (
+            isinstance(
+                sequence,
+                list,
+            )
+            and 0
+            <= int(
+                sequence_row
+            )
+            < len(
+                sequence
+            )
+            and isinstance(
+                sequence[
+                    int(
+                        sequence_row
+                    )
+                ],
+                dict,
+            )
+        ):
+            if (
+                best_u is not None
+                and np.isfinite(
+                    best_u
+                )
+            ):
+                sequence[
+                    int(
+                        sequence_row
+                    )
+                ][
+                    "shift_u"
+                ] = float(
+                    best_u
+                )
+
+            if (
+                best_v is not None
+                and np.isfinite(
+                    best_v
+                )
+            ):
+                sequence[
+                    int(
+                        sequence_row
+                    )
+                ][
+                    "shift_v"
+                ] = float(
+                    best_v
+                )
+
+            cfg_raw.set(
+                "layer_stacking",
+                "sequence_json",
+                json.dumps(
+                    sequence,
+                    separators=(
+                        ",",
+                        ":",
+                    ),
+                ),
+            )
+
+    else:
+        if (
+            best_u is not None
+            and np.isfinite(
+                best_u
+            )
+        ):
+            cfg_raw.set(
+                "layer_stacking",
+                "repeat_shift_u",
+                str(
+                    best_u
+                ),
+            )
+
+        if (
+            best_v is not None
+            and np.isfinite(
+                best_v
+            )
+        ):
+            cfg_raw.set(
+                "layer_stacking",
+                "repeat_shift_v",
+                str(
+                    best_v
+                ),
+            )
+
+    cfg_raw.set(
+        "stacking_search",
+        "spacing_treatment",
+        "fixed",
+    )
+
+    cfg_raw.set(
+        "stacking_search",
+        "lateral_treatment",
+        "fixed",
+    )
+
+    if (
+        best_u is not None
+        and np.isfinite(
+            best_u
+        )
+    ):
+        cfg_raw.set(
+            "stacking_search",
+            "u_minimum",
+            str(
+                best_u
+            ),
+        )
+
+        cfg_raw.set(
+            "stacking_search",
+            "u_maximum",
+            str(
+                best_u
+            ),
+        )
+
+    if (
+        best_v is not None
+        and np.isfinite(
+            best_v
+        )
+    ):
+        cfg_raw.set(
+            "stacking_search",
+            "v_minimum",
+            str(
+                best_v
+            ),
+        )
+
+        cfg_raw.set(
+            "stacking_search",
+            "v_maximum",
+            str(
+                best_v
+            ),
+        )
+
+    if (
+        best_spacing is not None
+        and np.isfinite(
+            best_spacing
+        )
+    ):
+        cfg_raw.set(
+            "stacking_search",
+            "spacing_minimum",
+            str(
+                best_spacing
+            ),
+        )
+
+        cfg_raw.set(
+            "stacking_search",
+            "spacing_maximum",
+            str(
+                best_spacing
+            ),
+        )
+
 
 class PdfPlotDialog(QtWidgets.QDialog):
     """Floating window for the PDF plot.
@@ -1014,7 +1375,9 @@ class WarrenDisplayOptionsDialog(QtWidgets.QDialog):
         # Selection buttons
         # -------------------------
         sel_row = QtWidgets.QHBoxLayout()
-        self.btn_default = QtWidgets.QPushButton("Default: min / middle / max")
+        self.btn_default = QtWidgets.QPushButton(
+            "Default: five directions with most points"
+        )
         self.btn_all = QtWidgets.QPushButton("Select all")
         self.btn_none = QtWidgets.QPushButton("Select none")
 
@@ -1668,6 +2031,857 @@ class LocalDynamicsDisplayOptionsDialog(QtWidgets.QDialog):
         self.owner._local_pair_style = pair_styles
 
 
+class ShapeFactorDisplayOptionsDialog(
+    QtWidgets.QDialog,
+):
+    """
+    Select displayed shape-factor directions.
+
+    Features
+    --------
+    - select multiple crystallographic directions;
+    - choose colors;
+    - show/hide symbols independently from connecting lines;
+    - search using a direction such as:
+
+          0 0 2
+
+      which is reduced automatically to:
+
+          [0 0 1]
+    """
+
+    def __init__(
+        self,
+        owner: "MainWindow",
+    ):
+        super().__init__(
+            owner
+        )
+
+        self.owner = owner
+
+        self.setWindowTitle(
+            "Shape-factor display options"
+        )
+
+        self.resize(
+            800,
+            600,
+        )
+
+        layout = QtWidgets.QVBoxLayout(
+            self
+        )
+
+        # ---------------------------------------------------------
+        # Display controls
+        # ---------------------------------------------------------
+        group_display = QtWidgets.QGroupBox(
+            "Display"
+        )
+
+        display_layout = QtWidgets.QFormLayout(
+            group_display
+        )
+
+        self.chk_show_symbols = QtWidgets.QCheckBox(
+            "Show symbols"
+        )
+
+        self.chk_show_symbols.setChecked(
+            bool(
+                getattr(
+                    owner,
+                    "_shape_factor_show_symbols",
+                    True,
+                )
+            )
+        )
+
+        self.chk_show_lines = QtWidgets.QCheckBox(
+            "Connect points with straight lines"
+        )
+
+        self.chk_show_lines.setChecked(
+            bool(
+                getattr(
+                    owner,
+                    "_shape_factor_show_lines",
+                    True,
+                )
+            )
+        )
+
+        display_layout.addRow(
+            self.chk_show_symbols
+        )
+
+        display_layout.addRow(
+            self.chk_show_lines
+        )
+
+        layout.addWidget(
+            group_display
+        )
+
+        # ---------------------------------------------------------
+        # Direction search
+        # ---------------------------------------------------------
+        group_search = QtWidgets.QGroupBox(
+            "Find crystallographic direction"
+        )
+
+        search_layout = QtWidgets.QHBoxLayout(
+            group_search
+        )
+
+        self.le_direction_search = QtWidgets.QLineEdit()
+        self.le_direction_search.setPlaceholderText(
+            "Examples: 0 0 2, 1 1 0, [2 0 0]"
+        )
+
+        self.btn_find_direction = QtWidgets.QPushButton(
+            "Find / select"
+        )
+
+        self.lbl_search_result = QtWidgets.QLabel(
+            ""
+        )
+
+        self.lbl_search_result.setWordWrap(
+            True
+        )
+
+        search_layout.addWidget(
+            QtWidgets.QLabel(
+                "h k l:"
+            )
+        )
+
+        search_layout.addWidget(
+            self.le_direction_search,
+            1,
+        )
+
+        search_layout.addWidget(
+            self.btn_find_direction,
+        )
+
+        layout.addWidget(
+            group_search
+        )
+
+        layout.addWidget(
+            self.lbl_search_result
+        )
+
+        # ---------------------------------------------------------
+        # Direction selection table
+        # ---------------------------------------------------------
+        self.table = QtWidgets.QTableWidget(
+            0,
+            5,
+        )
+
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Show",
+                "Direction",
+                "N shell rows",
+                "Maximum r / Å",
+                "Color",
+            ]
+        )
+
+        self.table.verticalHeader().setVisible(
+            False
+        )
+
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+
+        header = self.table.horizontalHeader()
+
+        header.setSectionResizeMode(
+            0,
+            QtWidgets.QHeaderView.ResizeToContents,
+        )
+
+        header.setSectionResizeMode(
+            1,
+            QtWidgets.QHeaderView.Stretch,
+        )
+
+        header.setSectionResizeMode(
+            2,
+            QtWidgets.QHeaderView.ResizeToContents,
+        )
+
+        header.setSectionResizeMode(
+            3,
+            QtWidgets.QHeaderView.ResizeToContents,
+        )
+
+        header.setSectionResizeMode(
+            4,
+            QtWidgets.QHeaderView.ResizeToContents,
+        )
+
+        layout.addWidget(
+            self.table,
+            1,
+        )
+
+        # ---------------------------------------------------------
+        # Buttons
+        # ---------------------------------------------------------
+        buttons = QtWidgets.QHBoxLayout()
+
+        self.btn_all = QtWidgets.QPushButton(
+            "Select all"
+        )
+
+        self.btn_none = QtWidgets.QPushButton(
+            "Select none"
+        )
+
+        self.btn_apply = QtWidgets.QPushButton(
+            "Apply"
+        )
+
+        self.btn_cancel = QtWidgets.QPushButton(
+            "Cancel"
+        )
+
+        buttons.addWidget(
+            self.btn_all
+        )
+
+        buttons.addWidget(
+            self.btn_none
+        )
+
+        buttons.addStretch(
+            1
+        )
+
+        buttons.addWidget(
+            self.btn_apply
+        )
+
+        buttons.addWidget(
+            self.btn_cancel
+        )
+
+        layout.addLayout(
+            buttons
+        )
+
+        self.btn_all.clicked.connect(
+            self._select_all
+        )
+
+        self.btn_none.clicked.connect(
+            self._select_none
+        )
+
+        self.btn_apply.clicked.connect(
+            self.accept
+        )
+
+        self.btn_cancel.clicked.connect(
+            self.reject
+        )
+
+        self.btn_find_direction.clicked.connect(
+            self._find_direction
+        )
+
+        self.le_direction_search.returnPressed.connect(
+            self._find_direction
+        )
+
+        self.table.cellDoubleClicked.connect(
+            self._choose_color
+        )
+
+        self._populate()
+
+    @staticmethod
+    def _reduce_direction(
+        h: int,
+        k: int,
+        l: int,
+    ) -> Tuple[int, int, int]:
+        """
+        Reduce a direct-space crystallographic direction.
+
+        Examples
+        --------
+        [0 0 2]  -> [0 0 1]
+        [2 2 0]  -> [1 1 0]
+        [-2 0 0] -> [1 0 0]
+
+        Opposite directions are equivalent for the shape-factor display,
+        so the first nonzero component is made positive.
+        """
+        from math import gcd
+
+        h = int(
+            h
+        )
+
+        k = int(
+            k
+        )
+
+        l = int(
+            l
+        )
+
+        if h == 0 and k == 0 and l == 0:
+            return (
+                0,
+                0,
+                0,
+            )
+
+        divisor = gcd(
+            gcd(
+                abs(
+                    h
+                ),
+                abs(
+                    k
+                ),
+            ),
+            abs(
+                l
+            ),
+        )
+
+        if divisor > 0:
+            h //= divisor
+            k //= divisor
+            l //= divisor
+
+        for value in (
+            h,
+            k,
+            l,
+        ):
+            if value != 0:
+                if value < 0:
+                    h = -h
+                    k = -k
+                    l = -l
+                break
+
+        return (
+            h,
+            k,
+            l,
+        )
+
+    def _find_direction(
+        self,
+    ) -> None:
+        """
+        Parse entered h k l, reduce it, then locate/select the corresponding
+        reduced direction in the table.
+        """
+        text = str(
+            self.le_direction_search.text()
+            or ""
+        ).strip()
+
+        values = re.findall(
+            r"-?\d+",
+            text,
+        )
+
+        if len(values) < 3:
+            self.lbl_search_result.setText(
+                "Enter three integers, for example: 0 0 2"
+            )
+            return
+
+        try:
+            direction = self._reduce_direction(
+                int(
+                    values[0]
+                ),
+                int(
+                    values[1]
+                ),
+                int(
+                    values[2]
+                ),
+            )
+        except Exception:
+            self.lbl_search_result.setText(
+                "Could not parse the entered direction."
+            )
+            return
+
+        if direction == (
+            0,
+            0,
+            0,
+        ):
+            self.lbl_search_result.setText(
+                "[0 0 0] is not a valid crystallographic direction."
+            )
+            return
+
+        for row in range(
+            self.table.rowCount()
+        ):
+            direction_item = self.table.item(
+                row,
+                1,
+            )
+
+            if direction_item is None:
+                continue
+
+            table_direction = direction_item.data(
+                Qt.UserRole
+            )
+
+            if table_direction is None:
+                continue
+
+            try:
+                table_direction = tuple(
+                    int(
+                        value
+                    )
+                    for value in table_direction
+                )
+            except Exception:
+                continue
+
+            if table_direction == direction:
+                show_item = self.table.item(
+                    row,
+                    0,
+                )
+
+                if show_item is not None:
+                    show_item.setCheckState(
+                        Qt.Checked
+                    )
+
+                self.table.selectRow(
+                    row
+                )
+
+                self.table.scrollToItem(
+                    direction_item,
+                    QtWidgets.QAbstractItemView.PositionAtCenter,
+                )
+
+                self.lbl_search_result.setText(
+                    "Found direction: "
+                    f"{self.owner._shape_factor_label(direction)}"
+                )
+
+                return
+
+        self.lbl_search_result.setText(
+            "No shell direction matches reduced direction "
+            f"{self.owner._shape_factor_label(direction)}."
+        )
+
+    def _populate(
+        self,
+    ) -> None:
+        data = getattr(
+            self.owner,
+            "_shape_factor_data",
+            {},
+        ) or {}
+
+        directions = data.get(
+            "directions",
+            {},
+        ) or {}
+
+        selected = set(
+            getattr(
+                self.owner,
+                "_shape_factor_selected_dirs",
+                [],
+            )
+            or []
+        )
+
+        style_map = getattr(
+            self.owner,
+            "_shape_factor_dir_style",
+            {},
+        ) or {}
+
+        keys = sorted(
+            directions.keys(),
+            key=lambda direction: int(
+                (
+                    directions.get(
+                        direction,
+                        {},
+                    )
+                    or {}
+                ).get(
+                    "n_shell_rows",
+                    0,
+                )
+            ),
+            reverse=True,
+        )
+
+        self.table.setRowCount(
+            len(
+                keys
+            )
+        )
+
+        for row, direction in enumerate(
+            keys
+        ):
+            info = directions.get(
+                direction,
+                {},
+            ) or {}
+
+            check = QtWidgets.QTableWidgetItem(
+                ""
+            )
+
+            check.setFlags(
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+                | Qt.ItemIsUserCheckable
+            )
+
+            check.setCheckState(
+                Qt.Checked
+                if direction in selected
+                else Qt.Unchecked
+            )
+
+            check.setData(
+                Qt.UserRole,
+                direction,
+            )
+
+            self.table.setItem(
+                row,
+                0,
+                check,
+            )
+
+            direction_text = self.owner._shape_factor_label(
+                direction
+            )
+
+            item_direction = QtWidgets.QTableWidgetItem(
+                direction_text
+            )
+
+            item_direction.setFlags(
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+            )
+
+            item_direction.setData(
+                Qt.UserRole,
+                direction,
+            )
+
+            self.table.setItem(
+                row,
+                1,
+                item_direction,
+            )
+
+            shell_rows = int(
+                info.get(
+                    "n_shell_rows",
+                    0,
+                )
+            )
+
+            item_count = QtWidgets.QTableWidgetItem(
+                str(
+                    shell_rows
+                )
+            )
+
+            item_count.setFlags(
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+            )
+
+            self.table.setItem(
+                row,
+                2,
+                item_count,
+            )
+
+            r_values = np.asarray(
+                info.get(
+                    "r",
+                    [],
+                ),
+                dtype=float,
+            )
+
+            if r_values.size:
+                max_r = float(
+                    np.nanmax(
+                        r_values
+                    )
+                )
+
+                max_r_text = f"{max_r:.5g}"
+            else:
+                max_r_text = ""
+
+            item_r = QtWidgets.QTableWidgetItem(
+                max_r_text
+            )
+
+            item_r.setFlags(
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+            )
+
+            self.table.setItem(
+                row,
+                3,
+                item_r,
+            )
+
+            color = _safe_mpl_color(
+                (
+                    style_map.get(
+                        direction,
+                        {},
+                    )
+                    or {}
+                ).get(
+                    "color",
+                    "",
+                ),
+                _COLOR_CYCLE[
+                    row
+                    % len(
+                        _COLOR_CYCLE
+                    )
+                ],
+            )
+
+            item_color = QtWidgets.QTableWidgetItem(
+                ""
+            )
+
+            item_color.setFlags(
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+            )
+
+            item_color.setData(
+                Qt.UserRole,
+                color,
+            )
+
+            item_color.setBackground(
+                QColor(
+                    color
+                )
+            )
+
+            item_color.setToolTip(
+                "Double-click to change color"
+            )
+
+            self.table.setItem(
+                row,
+                4,
+                item_color,
+            )
+
+    def _choose_color(
+        self,
+        row: int,
+        column: int,
+    ) -> None:
+        if column != 4:
+            return
+
+        item = self.table.item(
+            row,
+            4,
+        )
+
+        if item is None:
+            return
+
+        old_color = _safe_mpl_color(
+            item.data(
+                Qt.UserRole
+            ),
+            "#1f77b4",
+        )
+
+        color = QtWidgets.QColorDialog.getColor(
+            QColor(
+                old_color
+            ),
+            self,
+            "Choose shape-factor color",
+        )
+
+        if not color.isValid():
+            return
+
+        color_hex = color.name()
+
+        item.setData(
+            Qt.UserRole,
+            color_hex,
+        )
+
+        item.setBackground(
+            QColor(
+                color_hex
+            )
+        )
+
+    def _select_all(
+        self,
+    ) -> None:
+        for row in range(
+            self.table.rowCount()
+        ):
+            item = self.table.item(
+                row,
+                0,
+            )
+
+            if item is not None:
+                item.setCheckState(
+                    Qt.Checked
+                )
+
+    def _select_none(
+        self,
+    ) -> None:
+        for row in range(
+            self.table.rowCount()
+        ):
+            item = self.table.item(
+                row,
+                0,
+            )
+
+            if item is not None:
+                item.setCheckState(
+                    Qt.Unchecked
+                )
+
+    def apply_to_owner(
+        self,
+    ) -> None:
+        selected = []
+        styles = dict(
+            getattr(
+                self.owner,
+                "_shape_factor_dir_style",
+                {},
+            )
+            or {}
+        )
+
+        for row in range(
+            self.table.rowCount()
+        ):
+            check = self.table.item(
+                row,
+                0,
+            )
+
+            direction_item = self.table.item(
+                row,
+                1,
+            )
+
+            color_item = self.table.item(
+                row,
+                4,
+            )
+
+            if direction_item is None:
+                continue
+
+            direction = direction_item.data(
+                Qt.UserRole
+            )
+
+            if direction is None:
+                continue
+
+            direction = tuple(
+                int(value)
+                for value in direction
+            )
+
+            if (
+                check is not None
+                and check.checkState()
+                == Qt.Checked
+            ):
+                selected.append(
+                    direction
+                )
+
+            color = _safe_mpl_color(
+                (
+                    color_item.data(
+                        Qt.UserRole
+                    )
+                    if color_item is not None
+                    else ""
+                ),
+                "#1f77b4",
+            )
+
+            styles[
+                direction
+            ] = {
+                "color": color,
+                "linestyle": "-",
+                "marker": "o",
+                "linewidth": 1.5,
+                "markersize": 5.0,
+            }
+
+        self.owner._shape_factor_selected_dirs = selected
+
+        self.owner._shape_factor_dir_style = styles
+
+        self.owner._shape_factor_show_symbols = bool(
+            self.chk_show_symbols.isChecked()
+        )
+
+        self.owner._shape_factor_show_lines = bool(
+            self.chk_show_lines.isChecked()
+        )
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1930,8 +3144,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_tabs.addTab(self.builder, "Builder")
         self.left_tabs.addTab(self.raw_editor, "Raw input")
 
-        self.builder.changed.connect(self._on_builder_changed)
-        self.raw_editor.textChanged.connect(self._on_raw_changed)
+        self._builder_sync_timer = QtCore.QTimer(self)
+        self._builder_sync_timer.setSingleShot(True)
+        self._builder_sync_timer.setInterval(300)
+        self._builder_sync_timer.timeout.connect(
+            self._flush_builder_sync
+        )
+
+        self.builder.changed.connect(
+            self._on_builder_changed
+        )
+
+        self.raw_editor.textChanged.connect(
+            self._on_raw_changed
+        )
 
         # Results tabs
         self.tabs = QtWidgets.QTabWidget()
@@ -2026,35 +3252,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # Crystallite-shape grid-search plots
         self._cs_results: List[Dict[str, Any]] = []
 
-        self.cs_grid_widget = QtWidgets.QWidget()
-        _cs_layout = QtWidgets.QVBoxLayout(self.cs_grid_widget)
-        _cs_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.cs_grid_tabs = QtWidgets.QTabWidget()
-
-        self.plot_cs_diameter = FastLinePlot(
-            title="Final Rwp vs diameter",
-            xlabel="Diameter / unit cells",
-            ylabel="Best Rwp (%)",
+        # Main Rwp/PDF display during a crystallite-size search always shows
+        # the globally best completed candidate, never the last candidate.
+        self._cs_best_display_rwp = float(
+            "inf"
         )
 
-        self.plot_cs_height = FastLinePlot(
-            title="Final Rwp vs axis length",
-            xlabel="Axis length / unit cells",
-            ylabel="Best Rwp (%)",
+        self._cs_best_display_payload = None
+
+        self.cs_results_explorer = CSResultsExplorer(
+            self
         )
 
-        self.plot_cs_map = FastGridMap(
-            title="CS grid search Rwp map",
-            xlabel="Diameter / unit cells",
-            ylabel="Axis length / unit cells",
+        self.cs_grid_widget = self.cs_results_explorer
+
+        self.cs_results_explorer.candidateSelected.connect(
+            self._on_cs_candidate_selected
         )
 
-        self.cs_grid_tabs.addTab(self.plot_cs_diameter, "Rwp vs diameter")
-        self.cs_grid_tabs.addTab(self.plot_cs_height, "Rwp vs axis length")
-        self.cs_grid_tabs.addTab(self.plot_cs_map, "Rwp map")
+        self.cs_results_explorer.applyCandidateRequested.connect(
+            self._apply_selected_cs_candidate
+        )
 
-        _cs_layout.addWidget(self.cs_grid_tabs, 1)
+        self.cs_results_explorer.openSeparateWindowRequested.connect(
+            self._open_cs_results_window
+        )
 
         # Local lambda / delta trend plot
         self.plot_local_trends = FastLinePlot(
@@ -2168,6 +3390,104 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.param_tabs, "Params")
         self.tabs.addTab(self.plot_local_trends, "Local trends")
         self._structure_tab_index = -1
+
+        # ---------------------------------------------------------
+        # Shape-factor diagnostic plot
+        # ---------------------------------------------------------
+        self.plot_shape_factors = FastLinePlot(
+            title="Crystallite shape factors",
+            xlabel="Pair distance r (Å)",
+            ylabel="Shape factor γ(r)",
+        )
+
+        self._shape_factor_data: Dict[str, Any] = {}
+        self._shape_factor_selected_dirs = []
+        self._shape_factor_dir_style: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
+
+        # Shape-factor display defaults.
+        #
+        # Finite shape factors are naturally discrete shell values. By default
+        # show symbols connected by straight lines.
+        self._shape_factor_show_symbols = True
+        self._shape_factor_show_lines = True
+
+        # Reserved for a future optional PDF-baseline interpolation display.
+        # Current normal display uses discrete shell values only.
+        self._shape_factor_display_mode = "discrete"
+
+        self._shape_factor_model_kind = ""
+        self._shape_factor_dialog_window = None
+
+        self.btn_shape_factor_refresh = QtWidgets.QPushButton(
+            "Reload shape factors"
+        )
+
+        self.btn_shape_factor_options = QtWidgets.QPushButton(
+            "Display options"
+        )
+
+        self.btn_shape_factor_save = QtWidgets.QPushButton(
+            "Save data"
+        )
+
+        self.btn_shape_factor_window = QtWidgets.QPushButton(
+            "Open window"
+        )
+
+        self.btn_shape_factor_refresh.setToolTip(
+            "Load/build the current finite or analytical shape-factor data."
+        )
+
+        self.btn_shape_factor_options.setToolTip(
+            "Choose directions, colors, markers, and whether to show "
+            "discrete shell values or interpolated curves."
+        )
+
+        self.btn_shape_factor_save.setToolTip(
+            "Save the currently selected directional shape-factor curves."
+        )
+
+        self.btn_shape_factor_window.setToolTip(
+            "Open the shape-factor plot in a separate window."
+        )
+
+        try:
+            self.plot_shape_factors.toolbar.addSeparator()
+            self.plot_shape_factors.toolbar.addWidget(
+                self.btn_shape_factor_refresh
+            )
+            self.plot_shape_factors.toolbar.addWidget(
+                self.btn_shape_factor_options
+            )
+            self.plot_shape_factors.toolbar.addWidget(
+                self.btn_shape_factor_window
+            )
+            self.plot_shape_factors.toolbar.addWidget(
+                self.btn_shape_factor_save
+            )
+        except Exception:
+            pass
+
+        self.btn_shape_factor_refresh.clicked.connect(
+            self.load_shape_factor_data
+        )
+
+        self.btn_shape_factor_options.clicked.connect(
+            self.open_shape_factor_display_options
+        )
+
+        self.btn_shape_factor_save.clicked.connect(
+            self.save_shape_factor_data
+        )
+
+        self.btn_shape_factor_window.clicked.connect(
+            self.open_shape_factor_plot_window
+        )
+
+        self.tabs.addTab(
+            self.plot_shape_factors,
+            "Shape factors",
+        )
 
         # -------------------------
         # Horizontal splitter: LEFT vs RIGHT (default 50/50)
@@ -2619,11 +3939,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _commit_pending_gui_edits(self) -> None:
+        """
+        Commit the currently focused editor.
+
+        Do not call QApplication.processEvents() here. Processing nested events
+        while handling Builder.changed can recursively re-enter Builder
+        synchronization.
+        """
         try:
-            fw = QtWidgets.QApplication.focusWidget()
-            if fw is not None:
-                fw.clearFocus()
-            QtWidgets.QApplication.processEvents()
+            focused_widget = (
+                QtWidgets.QApplication.focusWidget()
+            )
+
+            if focused_widget is not None:
+                focused_widget.clearFocus()
+
         except Exception:
             pass
 
@@ -2769,53 +4099,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Updated raw input from Builder.")
 
     def _on_builder_changed(self) -> None:
+        """
+        Handle Builder changes without immediately serializing hundreds of
+        atomic-site parameters for every individual widget event.
+        """
         if self._sync_block:
             return
 
         self._prepared_calculation = None
 
         if self.left_tabs.currentWidget() is self.builder:
-            # Auto-sync Builder -> raw input immediately.
-            # commit_edits=False avoids stealing focus while the user is typing in a table.
-            self._apply_builder_into_raw(commit_edits=False)
-            # Optional autosave to disk.
-            # Enable this only if you really want every Builder change to overwrite the file.
-            if self._current_path:
-                try:
-                    with open(self._current_path, "w", encoding="utf-8") as f:
-                        f.write(self.raw_editor.toPlainText())
-                except Exception:
-                    pass
+            self._builder_sync_timer.start()
 
-            self.statusBar().showMessage("Builder changed: raw input updated.")
+            self.statusBar().showMessage(
+                "Builder changed. Raw input synchronization is pending."
+            )
 
-            # Do not parse the raw input and refresh structure view on every
-            # small Builder edit. Only do it when the structure path changes.
+        self._update_run_button_modes()
+
+
+    def _flush_builder_sync(self) -> None:
+        """
+        Synchronize the Builder to the raw input after a short quiet period.
+        """
+        if self._sync_block:
+            return
+
+        if self.left_tabs.currentWidget() is not self.builder:
+            return
+
+        self._apply_builder_into_raw(
+            commit_edits=False
+        )
+
+        if self._current_path:
             try:
-                structure_path = str(
-                    self.builder.le_structure.text()
-                    or ""
-                ).strip()
-
-                if structure_path != getattr(
-                    self,
-                    "_last_builder_structure_path_for_view",
-                    "",
-                ):
-                    self._last_builder_structure_path_for_view = structure_path
-
-                    cfg = self._parse_raw_to_dict()
-
-                    if cfg:
-                        self._refresh_structure_view(cfg)
+                with open(
+                    self._current_path,
+                    "w",
+                    encoding="utf-8",
+                ) as file:
+                    file.write(
+                        self.raw_editor.toPlainText()
+                    )
 
             except Exception:
                 pass
 
-        self._update_run_button_modes()
+        self.statusBar().showMessage(
+            "Builder changes synchronized to raw input."
+        )
 
-            # Do NOT compute shells / local trends here.
-            # Shell generation must happen only when Run is clicked.
 
     def _on_raw_changed(self) -> None:
         if self._sync_block:
@@ -2973,6 +4307,43 @@ class MainWindow(QtWidgets.QMainWindow):
             dict,
         ):
             return
+
+        shape_cfg = config.get(
+            "crystallite_shape",
+            {},
+        ) or {}
+
+        stack_cfg = config.get(
+            "layer_stacking",
+            {},
+        ) or {}
+
+        shape_mode = str(
+            shape_cfg.get(
+                "mode",
+                "conventional",
+            )
+            or "conventional"
+        ).strip().lower()
+
+        stacked_finite_model = bool(
+            shape_mode == "finite_shape"
+            and bool(
+                stack_cfg.get(
+                    "enabled",
+                    False,
+                )
+            )
+        )
+
+        if stacked_finite_model:
+            self.statusBar().showMessage(
+                "Input loaded. Dynamic stacked model will be built "
+                "when Calculate or Run finite-shape fit is pressed."
+            )
+
+            return
+
 
         structure_file = str(
             config.get(
@@ -3560,14 +4931,292 @@ class MainWindow(QtWidgets.QMainWindow):
             r_exp = r_exp[mask]
             G_exp = G_exp[mask]
 
-            # Build model
+            # ---------------------------------------------------------
+            # Build PDF model.
+            #
+            # Conventional mode:
+            #     use the normal/infinite-crystal shell table.
+            #
+            # Finite predefined shape:
+            #     build/load the atomistic finite-shell table and replace
+            #     the normal infinite-crystal shell table.
+            #
+            # Grid-search finite shapes:
+            #     Calculate is intentionally not defined because more than
+            #     one candidate exists. Use "Run CS grid search" instead.
+            # ---------------------------------------------------------
             model_start = time.perf_counter()
 
-            pdf_model = self._get_or_build_calculate_model(
-                config,
-                r_exp,
-                pair_cutoff,
-            )
+            shape_cfg = config.get(
+                "crystallite_shape",
+                {},
+            ) or {}
+
+            shape_mode = str(
+                shape_cfg.get(
+                    "mode",
+                    "conventional",
+                )
+            ).strip().lower()
+
+            shape_search_mode = str(
+                shape_cfg.get(
+                    "search_mode",
+                    "grid_search",
+                )
+            ).strip().lower()
+
+            if (
+                shape_mode == "finite_shape"
+                and shape_search_mode == "predefined"
+            ):
+                from pdf_fitting.models.gr_model import PDFCalculator
+
+                from pdf_fitting.models.crystallite_shapes import (
+                    CrystalliteShapeSpec,
+                )
+
+                from pdf_fitting.models.finite_shape_shells import (
+                    get_or_build_finite_shell_result,
+                )
+
+                self.statusBar().showMessage(
+                    "Building/loading finite-shape shell table..."
+                )
+
+                QtWidgets.QApplication.processEvents()
+
+                # Do not use the background-prepared conventional model.
+                # It contains an infinite-crystal shell table.
+                pdf_config = dict(
+                    config
+                )
+
+                pdf_config[
+                    "refinement"
+                ] = dict(
+                    config.get(
+                        "refinement",
+                        {},
+                    )
+                    or {}
+                )
+
+                stack_cfg = (
+                    config.get(
+                        "layer_stacking",
+                        {},
+                    )
+                    or {}
+                )
+
+                if bool(
+                    stack_cfg.get(
+                        "enabled",
+                        False,
+                    )
+                ):
+                    pdf_config[
+                        "refinement"
+                    ][
+                        "defer_cuda_pdf_backend"
+                    ] = True
+
+                pdf_model = PDFCalculator(
+                    pdf_config,
+                    pdf_config["structure_file"],
+                    r_exp,
+                    pair_cutoff=pair_cutoff,
+                )
+
+                shape_spec = CrystalliteShapeSpec.from_dict(
+                    shape_cfg
+                )
+
+                from pdf_fitting.models.layer_stacking import (
+                    stacking_spec_from_config,
+                )
+
+                from pdf_fitting.models.dynamic_stacked_model import (
+                    DynamicStackedPdfModel,
+                )
+
+                stack_spec = stacking_spec_from_config(
+                    config
+                )
+
+
+                if stack_spec.enabled:
+                    topology_margin = float(
+                        (
+                            config.get(
+                                "refinement",
+                                {},
+                            )
+                            or {}
+                        ).get(
+                            "stacked_topology_margin",
+                            3.0,
+                        )
+                    )
+
+                    if (
+                        stack_spec.model
+                        in {
+                            "correlated_ab_disorder",
+                            "generic_markov",
+                        }
+                    ):
+                        from pdf_fitting.models.stochastic_ensemble_spec import (
+                            stochastic_ensemble_spec_from_config,
+                        )
+
+                        ensemble_spec = (
+                            stochastic_ensemble_spec_from_config(
+                                config
+                            )
+                        )
+
+                        if ensemble_spec.use_stacking_as_bulk:
+                            from pdf_fitting.models.streaming_stacking_bulk_model import (
+                                StreamingStackingBulkModel,
+                            )
+
+                            pdf_model = StreamingStackingBulkModel(
+                                config=config,
+                                source_structure=(
+                                    pdf_model
+                                    .structure_handler
+                                    .structure
+                                ),
+                                stack_spec=stack_spec,
+                                ensemble_spec=ensemble_spec,
+                                pair_cutoff=float(
+                                    pair_cutoff
+                                ),
+                                r_grid=r_exp,
+                                reference_parameters=(
+                                    config.get(
+                                        "initial",
+                                        {},
+                                    )
+                                    or {}
+                                ),
+                            )
+
+                        else:
+                            from pdf_fitting.models.stochastic_stacked_pdf_model import (
+                                StochasticStackedPdfModel,
+                            )
+
+                            pdf_model = StochasticStackedPdfModel(
+                                pdf_calculator=pdf_model,
+                                source_structure=(
+                                    pdf_model
+                                    .structure_handler
+                                    .structure
+                                ),
+                                shape_spec=shape_spec,
+                                stack_spec=stack_spec,
+                                pair_cutoff=float(
+                                    pair_cutoff
+                                ),
+                                topology_margin=topology_margin,
+                                reference_parameters=(
+                                    config.get(
+                                        "initial",
+                                        {},
+                                    )
+                                    or {}
+                                ),
+                            )
+
+                    else:
+                        pdf_model = DynamicStackedPdfModel(
+                            pdf_calculator=pdf_model,
+                            source_structure=(
+                                pdf_model
+                                .structure_handler
+                                .structure
+                            ),
+                            shape_spec=shape_spec,
+                            stack_spec=stack_spec,
+                            pair_cutoff=float(
+                                pair_cutoff
+                            ),
+                            topology_margin=topology_margin,
+                            reference_parameters=(
+                                config.get(
+                                    "initial",
+                                    {},
+                                )
+                                or {}
+                            ),
+                        )
+
+                    print(
+                        "[CALCULATE] Using stacked model: "
+                        f"model={stack_spec.model}, "
+                        f"layers={int(round(shape_spec.axis3_cells))}, "
+                        f"spacing_mode={stack_spec.spacing_mode}"
+                    )
+
+                else:
+                    finite_result = get_or_build_finite_shell_result(
+                        pdf_model.structure_handler.structure,
+                        pair_cutoff=float(
+                            pair_cutoff
+                        ),
+                        shape_spec=shape_spec,
+                        refinement_config=(
+                            config.get(
+                                "refinement",
+                                {},
+                            )
+                            or {}
+                        ),
+                        boundary_mode="atom",
+                    )
+
+                    pdf_model.replace_shell_table(
+                        finite_result.shell_table,
+                        device_shell_table=(
+                            finite_result.device_shell_table
+                        ),
+                    )
+
+                    print(
+                        "[CALCULATE] Finite shell construction: "
+                        f"backend={finite_result.backend}, "
+                        f"cache_hit={finite_result.cache_hit}, "
+                        f"time={finite_result.build_seconds:.3f} s"
+                    )
+
+                    print(
+                        "[CALCULATE] Using finite atomistic shell table: "
+                        f"shape={shape_spec.shape_type}, "
+                        f"D_cells={shape_spec.diameter_cells}, "
+                        f"H_cells={shape_spec.height_cells}, "
+                        f"search_mode={shape_spec.search_mode}"
+                    )
+
+            elif (
+                shape_mode == "finite_shape"
+                and shape_search_mode == "grid_search"
+            ):
+                raise ValueError(
+                    "Calculate cannot evaluate a finite-shape grid search "
+                    "because it contains multiple diameter/height candidates. "
+                    "Select 'Pre-defined crystallite dimensions' or use "
+                    "'Run CS grid search'."
+                )
+
+            else:
+                pdf_model = self._get_or_build_calculate_model(
+                    config,
+                    r_exp,
+                    pair_cutoff,
+                )
 
             print(
                 "[CALCULATE TIMING] Get/build model: "
@@ -3954,85 +5603,171 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_shape_mode(self) -> str:
         """
-        Return current crystallite-shape mode.
-    
-        Prefer the Builder state when the Builder exists, because the raw editor may
-        not yet have been synchronized after pressing Apply in the shape dialog.
+        Return the currently selected crystallite-shape mode.
+
+        When the Builder is active, read its widgets directly. Do not serialize
+        and reparse the complete input merely to update button states.
         """
         try:
-            if hasattr(self, "builder") and self.builder is not None:
-                spec = getattr(self.builder, "_crystallite_shape_spec", {}) or {}
-    
-                use_shape_tab = (
-                    hasattr(self.builder, "combo_size_model")
-                    and self.builder.combo_size_model.currentIndex() == 2
+            if (
+                hasattr(self, "builder")
+                and self.builder is not None
+                and self.left_tabs.currentWidget() is self.builder
+            ):
+                size_model_index = int(
+                    self.builder.combo_size_model.currentIndex()
                 )
-                
-                if use_shape_tab and spec:
+
+                if size_model_index == 2:
                     return "finite_shape"
+
+                return "conventional"
+
         except Exception:
             pass
-        
+
         try:
-            txt = self.raw_editor.toPlainText()
-    
-            if self.left_tabs.currentWidget() is self.builder:
-                txt = self._compose_input_text_for_run()
-    
-            if not txt.strip():
+            cfg = self._parse_raw_to_dict()
+
+            if not cfg:
                 return "conventional"
-    
-            tmp = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".inp",
-                mode="w",
-                encoding="utf-8",
+
+            shape_cfg = (
+                cfg.get(
+                    "crystallite_shape",
+                    {},
+                )
+                or {}
             )
-            tmp.write(txt)
-            tmp.flush()
-            tmp.close()
-    
-            try:
-                cfg = read_input_file(tmp.name)
-            finally:
-                try:
-                    os.unlink(tmp.name)
-                except Exception:
-                    pass
-                
-            shape_cfg = cfg.get("crystallite_shape", {}) or {}
-            return str(shape_cfg.get("mode", "conventional")).strip().lower()
-    
+
+            return str(
+                shape_cfg.get(
+                    "mode",
+                    "conventional",
+                )
+            ).strip().lower()
+
         except Exception:
             return "conventional"
 
-    def _update_run_button_modes(self) -> None:
-        running = bool(self._worker is not None and self._worker.isRunning())
 
-        if running:
-            self.btn_run.setEnabled(False)
-            self.btn_run_cs.setEnabled(False)
+    def _update_run_button_modes(self) -> None:
+        """
+        Update Run-button availability without allowing recursive updates.
+        """
+        if getattr(
+            self,
+            "_updating_run_button_modes",
+            False,
+        ):
             return
 
-        mode = self._current_shape_mode()
-        finite = mode == "finite_shape"
+        self._updating_run_button_modes = True
 
-        search_mode = self._current_shape_search_mode()
-
-        self.btn_run.setEnabled(not finite)
-        self.btn_run_cs.setEnabled(finite)
-
-        if finite and search_mode == "predefined":
-            self.btn_run_cs.setText("Run finite-shape fit")
-            self.btn_run_cs.setToolTip(
-                "Run one refinement using the pre-defined crystallite dimensions."
+        try:
+            running = bool(
+                self._worker is not None
+                and self._worker.isRunning()
             )
-        else:
-            self.btn_run_cs.setText("Run CS grid search")
-            self.btn_run_cs.setToolTip(
-                "Run discrete crystallite-shape grid search. "
-                "Each shape candidate is tested by refining continuous PDF parameters."
+
+            if running:
+                self.btn_run.setEnabled(False)
+                self.btn_run_cs.setEnabled(False)
+                return
+
+            mode = self._current_shape_mode()
+            finite = mode == "finite_shape"
+
+            search_mode = self._current_shape_search_mode()
+
+            self.btn_run.setEnabled(
+                not finite
             )
+
+            self.btn_run_cs.setEnabled(
+                finite
+            )
+
+            if (
+                finite
+                and search_mode == "predefined"
+            ):
+                self.btn_run_cs.setText(
+                    "Run finite-shape fit"
+                )
+
+                self.btn_run_cs.setToolTip(
+                    "Run one refinement using the pre-defined "
+                    "crystallite dimensions."
+                )
+
+            else:
+                self.btn_run_cs.setText(
+                    "Run CS grid search"
+                )
+
+                self.btn_run_cs.setToolTip(
+                    "Run discrete crystallite-shape grid search. "
+                    "Each shape candidate is tested by refining "
+                    "continuous PDF parameters."
+                )
+
+        finally:
+            self._updating_run_button_modes = False
+
+
+    def _reset_pdf_for_new_cs_run(
+        self,
+    ) -> None:
+        """
+        Clear all PDF state from the previous refinement/search.
+
+        The first completed candidate of every new finite-shape run must always
+        become the displayed candidate, regardless of the best Rwp from a
+        previous run.
+        """
+        self._pdf_best_rwp = float(
+            "inf"
+        )
+
+        self._cs_best_display_rwp = float(
+            "inf"
+        )
+
+        self._cs_best_display_payload = None
+
+        self._cs_live_pdf_candidate = None
+        self._cs_live_pdf_rwp = float(
+            "inf"
+        )
+
+        try:
+            self.plot_pdf.clear()
+        except Exception:
+            pass
+
+        self.pdf_line_exp = None
+        self.pdf_line_fit = None
+        self.pdf_line_res = None
+        self.pdf_rwp_text = None
+
+        if hasattr(
+            self,
+            "pdf_line_gamma",
+        ):
+            self.pdf_line_gamma = None
+
+        self._pdf_pair_contrib = {}
+        self._pdf_pair_lines = {}
+        self._pdf_pair_sum_line = None
+
+        try:
+            self._clear_pdf_tick_markers()
+        except Exception:
+            pass
+
+        self._pdf_tick_data = {}
+
 
     def run_cs_grid_search(self):
         """
@@ -4069,16 +5804,141 @@ class MainWindow(QtWidgets.QMainWindow):
         tmp.flush()
         tmp.close()
 
+        self._refinable_allowed = set()
+
+        try:
+            cs_config = read_input_file(
+                tmp.name
+            )
+
+            refinable_flags = dict(
+                cs_config.get(
+                    "refinable",
+                    {},
+                )
+                or {}
+            )
+
+            self._refinable_allowed = {
+                str(parameter_name)
+                for parameter_name, enabled
+                in refinable_flags.items()
+                if bool(enabled)
+            }
+
+            self.param_tabs.clear_all()
+
+            for parameter_name in sorted(
+                self._refinable_allowed
+            ):
+                self.param_tabs.ensure_param(
+                    parameter_name
+                )
+
+            print(
+                "[CS GUI] Refinable parameters shown in Params tab: "
+                f"{len(self._refinable_allowed)}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            self._refinable_allowed = set()
+
+            print(
+                "[CS GUI] Could not determine refinable parameters: "
+                f"{exc}",
+                flush=True,
+            )
+
         from .cs_grid_worker import CSGridSearchWorker
 
         self._cs_results = []
 
+        self.cs_results_explorer.clear_results()
+
+        # Remove every fit and best-Rwp threshold from the previous run.
+        # The first completed candidate of this run must always be shown.
+        self._reset_pdf_for_new_cs_run()
+
+        # ---------------------------------------------------------
+        # Real-time CS refinement progress.
+        #
+        # Every residual evaluation increments the global evaluation
+        # counter. A new graph point is added only when Rwp improves.
+        # ---------------------------------------------------------
+        self._cs_live_candidate_index = None
+        self._cs_live_candidate_total = 0
+
+        self._cs_global_nfev_counter = 0
+
+        self._cs_live_best_rwp = float(
+            "inf"
+        )
+
+        self._cs_live_last_pdf_rwp = float(
+            "inf"
+        )
+
+        self._cs_live_rwp_x = []
+        self._cs_live_rwp_y = []
+
+        # Reset the Rwp plot for this new finite-shape/grid-search run.
+
+        self._reset_progress_series()
+
+        # Recreate the line with symbols so the first improvement is visible.
+        self.plot_rwp.clear()
+
+        self.plot_rwp.set_title(
+            "Best Rwp vs refinement evaluation"
+        )
+
+        self.plot_rwp.set_xlabel(
+            "Global nfev"
+        )
+
+        self.plot_rwp.set_ylabel(
+            "Best Rwp (%)"
+        )
+
+        self.rwp_x = []
+        self.rwp_y = []
+
+        self.rwp_line = self.plot_rwp.add_curve(
+            [],
+            [],
+            color="#1f77b4",
+            width=1.8,
+            symbol="o",
+            symbol_size=7.0,
+            name="Best Rwp",
+        )
+
+        self.plot_rwp.auto_range()
+
+
+        self.rwp_line = self.plot_rwp.add_curve(
+            [],
+            [],
+            color="#1f77b4",
+            width=1.8,
+            symbol="o",
+            symbol_size=8.0,
+            name="Candidate Rwp",
+        )
+
         try:
-            self.plot_cs_diameter.clear()
-            self.plot_cs_height.clear()
-            self.plot_cs_map.clear()
+            self.plot_rwp.plot_widget.getPlotItem().getAxis(
+                "bottom"
+            ).setStyle(
+                autoExpandTextSpace=True
+            )
         except Exception:
             pass
+
+        self.plot_rwp.auto_range()
+
+
 
         self._worker = CSGridSearchWorker(
             input_path=tmp.name,
@@ -4093,6 +5953,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker.failed.connect(self.on_failed)
         self._worker.status.connect(lambda s: self.statusBar().showMessage(s))
 
+        # Keep the Python/QThread object alive until the QThread has actually
+        # stopped. Do not clear self._worker from finished_ok.
+        self._worker.finished.connect(
+            self._on_cs_grid_worker_thread_finished
+        )
+
         self.btn_calculate.setEnabled(False)
         self.btn_run.setEnabled(False)
         self.btn_run_cs.setEnabled(False)
@@ -4105,141 +5971,848 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker.start()
 
     @QtCore.Slot(dict)
-    def on_cs_grid_progress(self, payload: Dict[str, Any]):
+    def on_cs_grid_progress(
+        self,
+        payload: Dict[str, Any],
+    ):
         """
-        Receive live progress or completed shape result from CSGridSearchWorker.
+        Receive finite-shape/grid-search updates.
+
+        Inner least-squares iterations update only the status bar and parameter
+        evolution.
+
+        Every completed candidate is added to the Rwp-vs-candidate graph.
+
+        The first completed candidate is displayed in the PDF window. Later
+        candidates replace it only when their final Rwp is lower.
         """
-        # ---------------------------------------------------------
-        # Live inner-refinement update
-        # ---------------------------------------------------------
         if "nfev" in payload:
+            # -----------------------------------------------------
+            # Inner least-squares progress.
+            #
+            # Every payload corresponds to one reported residual
+            # evaluation. The graph receives a new point only when
+            # conventional Rwp improves.
+            # -----------------------------------------------------
             try:
-                nfev = int(payload.get("nfev", 0))
-                rwp = float(payload.get("rwp", np.nan))
+                candidate_index = int(
+                    payload.get(
+                        "index",
+                        payload.get(
+                            "stacking_candidate_index",
+                            0,
+                        ),
+                    )
+                )
+            except Exception:
+                candidate_index = 0
 
-                params = payload.get("params", {}) or {}
+            try:
+                candidate_total = int(
+                    payload.get(
+                        "n_total",
+                        0,
+                    )
+                )
+            except Exception:
+                candidate_total = 0
 
-                self.param_tabs.push(
-                    nfev,
-                    params,
-                    allowed=self._refinable_allowed if self._refinable_allowed else None,
+            try:
+                candidate_nfev = int(
+                    payload.get(
+                        "nfev",
+                        0,
+                    )
+                )
+            except Exception:
+                candidate_nfev = 0
+
+            try:
+                current_rwp = float(
+                    payload.get(
+                        "rwp",
+                        np.nan,
+                    )
+                )
+            except Exception:
+                current_rwp = float(
+                    "nan"
                 )
 
-                # Rwp plot.
-                if nfev > 0 and np.isfinite(rwp):
-                    key = int(nfev)
-                    self._rwp_best_by_nfev[key] = float(payload.get("best_rwp", rwp))
+            # Global counter does not restart when the next candidate begins.
+            self._cs_global_nfev_counter = int(
+                getattr(
+                    self,
+                    "_cs_global_nfev_counter",
+                    0,
+                )
+            ) + 1
 
-                    xs = sorted(self._rwp_best_by_nfev.keys())
-                    ys = [self._rwp_best_by_nfev[x] for x in xs]
+            global_nfev = int(
+                self._cs_global_nfev_counter
+            )
 
-                    self.rwp_x = xs
-                    self.rwp_y = ys
+            previous_best = float(
+                getattr(
+                    self,
+                    "_cs_live_best_rwp",
+                    float(
+                        "inf"
+                    ),
+                )
+            )
 
-                    if self.rwp_line is not None:
-                        self.rwp_line.set_data(self.rwp_x, self.rwp_y)
-                        self.plot_rwp.ax.relim()
-                        self.plot_rwp.ax.autoscale_view(True, True, True)
-                        self.plot_rwp.canvas.draw_idle()
+            improved = bool(
+                np.isfinite(
+                    current_rwp
+                )
+                and current_rwp
+                < previous_best
+                - 1.0e-10
+            )
 
-                # PDF plot.
-                if "r" in payload and "G_fit" in payload and "G_exp" in payload:
-                    r = np.asarray(payload["r"], dtype=float)
-                    G_exp = np.asarray(payload["G_exp"], dtype=float)
-                    G_fit = np.asarray(payload["G_fit"], dtype=float)
-                    res = np.asarray(payload.get("residual", G_exp - G_fit), dtype=float)
+            if improved:
+                self._cs_live_best_rwp = float(
+                    current_rwp
+                )
 
-                    shape_txt = (
-                        f"D={payload.get('diameter_cells', '?')}, "
-                        f"H={payload.get('height_cells', '?')}, "
-                        f"nfev={payload.get('nfev', '?')}"
+                self.rwp_x.append(
+                    float(
+                        global_nfev
+                    )
+                )
+
+                self.rwp_y.append(
+                    float(
+                        current_rwp
+                    )
+                )
+
+                if self.rwp_line is not None:
+                    self.rwp_line.set_data(
+                        np.asarray(
+                            self.rwp_x,
+                            dtype=float,
+                        ),
+                        np.asarray(
+                            self.rwp_y,
+                            dtype=float,
+                        ),
                     )
 
-                    self._update_pdf_plot(
-                        r,
-                        G_exp,
-                        G_fit,
-                        res,
-                        title_suffix=f"(finite shape: {shape_txt})",
-                        rwp=rwp,
+                    self.plot_rwp.set_title(
+                        "Best Rwp vs refinement evaluation"
                     )
 
+                    self.plot_rwp.set_xlabel(
+                        "Global nfev"
+                    )
+
+                    self.plot_rwp.set_ylabel(
+                        "Best Rwp (%)"
+                    )
+
+                    self.plot_rwp.auto_range()
+                    self.plot_rwp.canvas.draw_idle()
+
+                # ---------------------------------------------
+                # Update the PDF only for an improved Rwp point.
+                # ---------------------------------------------
+                if (
+                    bool(
+                        self.chk_update_pdf.isChecked()
+                    )
+                    and "r" in payload
+                    and "G_exp" in payload
+                    and "G_fit" in payload
+                ):
                     try:
-                        self.detach_pdf_plot()
-                    except Exception:
-                        pass
+                        r_values = np.asarray(
+                            payload[
+                                "r"
+                            ],
+                            dtype=float,
+                        )
 
-                self.statusBar().showMessage(
-                    f"Finite-shape refinement "
-                    f"{int(payload.get('shape_index', 0)) + 1}/"
-                    f"{int(payload.get('shape_total', 1))}: "
-                    f"D={payload.get('diameter_cells')}, "
-                    f"H={payload.get('height_cells')}, "
-                    f"nfev={payload.get('nfev')}, "
-                    f"Rwp={rwp:.3f}%"
+                        experimental = np.asarray(
+                            payload[
+                                "G_exp"
+                            ],
+                            dtype=float,
+                        )
+
+                        calculated = np.asarray(
+                            payload[
+                                "G_fit"
+                            ],
+                            dtype=float,
+                        )
+
+                        residual = np.asarray(
+                            payload.get(
+                                "residual",
+                                experimental
+                                - calculated,
+                            ),
+                            dtype=float,
+                        )
+
+                        self._update_pdf_plot(
+                            r_values,
+                            experimental,
+                            calculated,
+                            residual,
+                            title_suffix=(
+                                "Best during CS search: "
+                                f"candidate "
+                                f"{candidate_index + 1}/"
+                                f"{candidate_total}, "
+                                f"candidate nfev="
+                                f"{candidate_nfev}, "
+                                f"global nfev="
+                                f"{global_nfev}"
+                            ),
+                            rwp=current_rwp,
+                        )
+
+                    except Exception:
+                        import traceback
+
+                        traceback.print_exc()
+
+            # Parameter-evolution plots can still receive every evaluation.
+            try:
+                self.param_tabs.push(
+                    global_nfev,
+                    payload.get(
+                        "params",
+                        {},
+                    )
+                    or {},
+                    allowed=set(
+                        getattr(
+                            self,
+                            "_refinable_allowed",
+                            set(),
+                        )
+                        or set()
+                    ),
                 )
 
             except Exception:
                 pass
 
-            return
-
-        # ---------------------------------------------------------
-        # Completed candidate result
-        # ---------------------------------------------------------
-        try:
-            row = {
-                "diameter_cells": float(payload.get("diameter_cells", np.nan)),
-                "height_cells": float(payload.get("height_cells", np.nan)),
-                "rwp": float(payload.get("rwp", np.nan)),
-                "params": payload.get("params", {}) or {},
-            }
-
-            self._cs_results.append(row)
-
-            self._update_cs_grid_plots()
-
-            best = payload.get("best", None)
-
-            if isinstance(best, dict):
+            if np.isfinite(
+                current_rwp
+            ):
                 self.statusBar().showMessage(
-                    f"Finite-shape candidate "
-                    f"{int(payload.get('index', 0)) + 1}/"
-                    f"{int(payload.get('n_total', 0))}: "
-                    f"D={payload.get('diameter_cells')}, "
-                    f"H={payload.get('height_cells')}, "
-                    f"Rwp={float(payload.get('rwp', np.nan)):.3f} %, "
-                    f"best={float(best.get('rwp', np.nan)):.3f} %"
+                    "CS candidate "
+                    f"{candidate_index + 1}/"
+                    f"{candidate_total} | "
+                    f"candidate nfev={candidate_nfev} | "
+                    f"global nfev={global_nfev} | "
+                    f"current Rwp={current_rwp:.4f}% | "
+                    f"best Rwp="
+                    f"{self._cs_live_best_rwp:.4f}%"
                 )
 
-        except Exception:
-            pass
+            else:
+                self.statusBar().showMessage(
+                    "CS candidate "
+                    f"{candidate_index + 1}/"
+                    f"{candidate_total} | "
+                    f"candidate nfev={candidate_nfev} | "
+                    f"global nfev={global_nfev}"
+                )
 
+            return
+
+        try:
+            row = {
+                "index": int(
+                    payload.get(
+                        "index",
+                        0,
+                    )
+                ),
+                "n_total": int(
+                    payload.get(
+                        "n_total",
+                        0,
+                    )
+                ),
+                "cs_index": int(
+                    payload.get(
+                        "cs_index",
+                        payload.get(
+                            "shape_index",
+                            0,
+                        ),
+                    )
+                ),
+                "stacking_candidate_index": int(
+                    payload.get(
+                        "stacking_candidate_index",
+                        payload.get(
+                            "index",
+                            0,
+                        ),
+                    )
+                ),
+                "diameter_cells": _float_value(
+                    payload.get(
+                        "diameter_cells"
+                    )
+                ),
+                "height_cells": _float_value(
+                    payload.get(
+                        "height_cells"
+                    )
+                ),
+                "axis1_cells": _float_value(
+                    payload.get(
+                        "axis1_cells",
+                        payload.get(
+                            "diameter_cells"
+                        ),
+                    )
+                ),
+                "axis2_cells": _float_value(
+                    payload.get(
+                        "axis2_cells"
+                    )
+                ),
+                "axis3_cells": _float_value(
+                    payload.get(
+                        "axis3_cells",
+                        payload.get(
+                            "height_cells"
+                        ),
+                    )
+                ),
+                "number_of_layers": payload.get(
+                    "number_of_layers"
+                ),
+                "p_alt_index": int(
+                    payload.get(
+                        "p_alt_index",
+                        0,
+                    )
+                ),
+                "p_alternate": _float_value(
+                    payload.get(
+                        "p_alternate",
+                        np.nan,
+                    )
+                ),
+                "p_same_state": _float_value(
+                    payload.get(
+                        "p_same_state",
+                        np.nan,
+                    )
+                ),
+                "markov_matrix_index": int(
+                    payload.get(
+                        "markov_matrix_index",
+                        0,
+                    )
+                ),
+                "markov_transition_matrix": (
+                    None
+                    if payload.get(
+                        "markov_transition_matrix",
+                        None,
+                    )
+                    is None
+                    else [
+                        [
+                            float(
+                                probability
+                            )
+                            for probability in matrix_row
+                        ]
+                        for matrix_row in payload.get(
+                            "markov_transition_matrix",
+                            [],
+                        )
+                    ]
+                ),
+                "markov_state_labels": [
+                    str(
+                        label
+                    )
+                    for label in payload.get(
+                        "markov_state_labels",
+                        [],
+                    )
+                ],
+                "stacking_distance_grid": _float_value(
+                    payload.get(
+                        "stacking_distance_grid"
+                    )
+                ),
+                "stacking_distance": _float_value(
+                    payload.get(
+                        "stacking_distance"
+                    )
+                ),
+                "stacking_u": _float_value(
+                    payload.get(
+                        "stacking_u"
+                    )
+                ),
+                "stacking_v": _float_value(
+                    payload.get(
+                        "stacking_v"
+                    )
+                ),
+                "rwp": _float_value(
+                    payload.get(
+                        "rwp"
+                    )
+                ),
+                "params": dict(
+                    payload.get(
+                        "params",
+                        {},
+                    )
+                    or {}
+                ),
+                "initial_params": dict(
+                    payload.get(
+                        "initial_params",
+                        {},
+                    )
+                    or {}
+                ),
+                "refinable_flags": dict(
+                    payload.get(
+                        "refinable_flags",
+                        {},
+                    )
+                    or {}
+                ),
+                "fit_elapsed_s": _float_value(
+                    payload.get(
+                        "fit_elapsed_s"
+                    )
+                ),
+                "shell_build_s": _float_value(
+                    payload.get(
+                        "shell_build_s"
+                    )
+                ),
+                "detail_file": str(
+                    payload.get(
+                        "detail_file",
+                        "",
+                    )
+                    or ""
+                ),
+                "candidate_input_file": str(
+                    payload.get(
+                        "candidate_input_file",
+                        "",
+                    )
+                    or ""
+                ),
+                "metadata_file": str(
+                    payload.get(
+                        "metadata_file",
+                        "",
+                    )
+                    or ""
+                ),
+            }
+
+            if (
+                "r" in payload
+                and "G_exp" in payload
+                and "G_fit" in payload
+            ):
+                row["visual"] = {
+                    "r": np.asarray(
+                        payload["r"],
+                        dtype=float,
+                    ),
+                    "G_exp": np.asarray(
+                        payload["G_exp"],
+                        dtype=float,
+                    ),
+                    "G_fit": np.asarray(
+                        payload["G_fit"],
+                        dtype=float,
+                    ),
+                    "residual": np.asarray(
+                        payload.get(
+                            "residual",
+                            np.asarray(
+                                payload["G_exp"],
+                                dtype=float,
+                            )
+                            - np.asarray(
+                                payload["G_fit"],
+                                dtype=float,
+                            ),
+                        ),
+                        dtype=float,
+                    ),
+                }
+
+
+            self._cs_results.append(
+                row
+            )
+
+            self.cs_results_explorer.append_result(
+                row
+            )
+
+            candidate_number = (
+                int(
+                    payload.get(
+                        "index",
+                        0,
+                    )
+                )
+                + 1
+            )
+
+            candidate_total = int(
+                payload.get(
+                    "n_total",
+                    0,
+                )
+            )
+
+            rwp = float(
+                row["rwp"]
+            )
+
+            is_new_global_best = bool(
+                payload.get(
+                    "is_new_global_best",
+                    False,
+                )
+            )
+
+            # -----------------------------------------------------
+            # Rwp plot
+            #
+            # Show every completed candidate, not only global minima.
+            # This plot is reset when each new CS run starts.
+            # -----------------------------------------------------
+            if np.isfinite(
+                rwp
+            ):
+                self.rwp_x.append(
+                    float(
+                        candidate_number
+                    )
+                )
+
+                self.rwp_y.append(
+                    float(
+                        rwp
+                    )
+                )
+
+                if self.rwp_line is not None:
+                    self.rwp_line.set_data(
+                        np.asarray(
+                            self.rwp_x,
+                            dtype=float,
+                        ),
+                        np.asarray(
+                            self.rwp_y,
+                            dtype=float,
+                        ),
+                    )
+
+                    self.plot_rwp.set_title(
+                        "Rwp vs completed candidate number"
+                    )
+
+                    self.plot_rwp.set_xlabel(
+                        "Completed candidate number"
+                    )
+
+                    self.plot_rwp.set_ylabel(
+                        "Candidate Rwp (%)"
+                    )
+
+                    self.plot_rwp.auto_range()
+                    self.plot_rwp.canvas.draw_idle()
+
+            # -----------------------------------------------------
+            # Main PDF plot
+            #
+            # The first completed candidate is always displayed because
+            # _cs_best_display_rwp is reset to infinity at the start of
+            # every run. Later candidates replace it only when their Rwp
+            # is lower.
+            # -----------------------------------------------------
+            should_update_pdf = bool(
+                np.isfinite(
+                    rwp
+                )
+                and (
+                    self._cs_best_display_payload
+                    is None
+                    or rwp
+                    < self._cs_best_display_rwp
+                    - 1.0e-10
+                )
+            )
+
+            if not should_update_pdf:
+                self.statusBar().showMessage(
+                    f"CS candidate "
+                    f"{candidate_number}/{candidate_total}: "
+                    f"Rwp = {rwp:.3f}% | "
+                    f"best = {self._cs_best_display_rwp:.3f}%"
+                )
+                return
+
+            self._cs_best_display_rwp = float(
+                rwp
+            )
+
+            self._cs_best_display_payload = dict(
+                payload
+            )
+
+            # Worker sends complete arrays only when this candidate is the
+            # global best.
+            if (
+                "r" in payload
+                and "G_exp" in payload
+                and "G_fit" in payload
+            ):
+                r = np.asarray(
+                    payload["r"],
+                    dtype=float,
+                )
+
+                g_exp = np.asarray(
+                    payload["G_exp"],
+                    dtype=float,
+                )
+
+                g_fit = np.asarray(
+                    payload["G_fit"],
+                    dtype=float,
+                )
+
+                residual = np.asarray(
+                    payload.get(
+                        "residual",
+                        g_exp - g_fit,
+                    ),
+                    dtype=float,
+                )
+
+                shape_text = (
+                    f"axis1={row['axis1_cells']:.4g}, "
+                    f"axis2={row['axis2_cells']:.4g}, "
+                    f"axis3={row['axis3_cells']:.4g}"
+                )
+
+                self._update_pdf_plot(
+                    r,
+                    g_exp,
+                    g_fit,
+                    residual,
+                    title_suffix=(
+                        "CS global best: "
+                        + shape_text
+                    ),
+                    rwp=rwp,
+                )
+
+                try:
+                    self.detach_pdf_plot()
+                except Exception:
+                    pass
+
+            self.statusBar().showMessage(
+                f"New CS global best "
+                f"{candidate_number}/{candidate_total}: "
+                f"Rwp = {rwp:.3f}%"
+            )
+
+        except Exception:
+            import traceback
+            traceback.print_exc()
     # ---------------------------------------------------------
     # Existing completed-shape update below this point
     # ---------------------------------------------------------
 
-    @QtCore.Slot(dict)
-    def on_cs_grid_finished(self, result: Dict[str, Any]):
+    @QtCore.Slot()
+    def _on_cs_grid_worker_thread_finished(self) -> None:
         """
-        Called when finite-shape fit / CS grid search finishes.
+        Final cleanup for the finite-shape QThread.
+
+        finished_ok is emitted from inside CSGridSearchWorker.run(), slightly
+        before the QThread is guaranteed to have fully stopped. Therefore the
+        worker reference must remain alive until this QThread.finished signal.
+        """
+        worker = self.sender()
+
+        if worker is self._worker:
+            self._worker = None
+
+        try:
+            if worker is not None:
+                worker.deleteLater()
+        except Exception:
+            pass
+
+        self._update_run_button_modes()
+
+    @QtCore.Slot(dict)
+    def on_cs_grid_finished(
+        self,
+        result: Dict[str, Any],
+    ) -> None:
+        """
+        Called when a finite-shape fit / CS grid search produces its result.
+
+        Important:
+        Do NOT set self._worker = None here.
+
+        This signal is emitted from CSGridSearchWorker.run() before the QThread
+        is guaranteed to have completely stopped. The actual cleanup happens
+        in _on_cs_grid_worker_thread_finished().
         """
         self.btn_calculate.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
-        self._worker = None
-        self._update_run_button_modes()
+        results = list(
+            result.get(
+                "results",
+                [],
+            )
+            or []
+        )
+
+        if results:
+            self._cs_results = [
+                dict(row)
+                for row in results
+            ]
+
+            self.cs_results_explorer.set_results(
+                self._cs_results
+            )
 
         try:
             self._update_cs_grid_plots()
         except Exception:
             pass
 
-        best = result.get("best", None)
+        # Explicitly restore the globally best candidate at completion.
+        # The final candidate in the grid is often not the best one.
+        best_visual = result.get(
+            "best_visual",
+            None,
+        )
 
-        if isinstance(best, dict):
-            rwp_val = float(best.get("rwp", np.nan))
+        if not isinstance(
+            best_visual,
+            dict,
+        ):
+            best_visual = self._cs_best_display_payload
+
+        if isinstance(
+            best_visual,
+            dict,
+        ):
+            try:
+                r = np.asarray(
+                    best_visual[
+                        "r"
+                    ],
+                    dtype=float,
+                )
+
+                g_exp = np.asarray(
+                    best_visual[
+                        "G_exp"
+                    ],
+                    dtype=float,
+                )
+
+                g_fit = np.asarray(
+                    best_visual[
+                        "G_fit"
+                    ],
+                    dtype=float,
+                )
+
+                residual = np.asarray(
+                    best_visual.get(
+                        "residual",
+                        g_exp - g_fit,
+                    ),
+                    dtype=float,
+                )
+
+                best_rwp = float(
+                    best_visual.get(
+                        "rwp",
+                        np.nan,
+                    )
+                )
+
+                shape_text = (
+                    f"axis1={best_visual.get('axis1_cells')}, "
+                    f"axis2={best_visual.get('axis2_cells')}, "
+                    f"axis3={best_visual.get('axis3_cells')}"
+                )
+
+                self._update_pdf_plot(
+                    r,
+                    g_exp,
+                    g_fit,
+                    residual,
+                    title_suffix=(
+                        "Final CS global best: "
+                        + shape_text
+                    ),
+                    rwp=best_rwp,
+                )
+
+                self._cs_best_display_rwp = best_rwp
+                self._cs_best_display_payload = dict(
+                    best_visual
+                )
+
+                try:
+                    self.detach_pdf_plot()
+                except Exception:
+                    pass
+
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
+        best = result.get(
+            "best",
+            None,
+        )
+
+        if isinstance(
+            best,
+            dict,
+        ):
+            rwp_val = float(
+                best.get(
+                    "rwp",
+                    np.nan,
+                )
+            )
 
             reply = QtWidgets.QMessageBox.question(
                 self,
@@ -4248,16 +6821,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Diameter = {best.get('diameter_cells')}\n"
                 f"Axis length = {best.get('height_cells')}\n"
                 f"Rwp = {rwp_val:.3f} %\n\n"
-                "Save these refined parameters and shape dimensions to the input file?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                "Save these refined parameters and shape dimensions "
+                "to the input file?",
+                QtWidgets.QMessageBox.Yes
+                | QtWidgets.QMessageBox.No,
             )
 
             if reply == QtWidgets.QMessageBox.Yes:
-                self._save_cs_best_result_to_input(best, result)
+                self._save_cs_best_result_to_input(
+                    best,
+                    result,
+                )
 
         self.statusBar().showMessage(
-            f"Finite-shape run finished in {float(result.get('elapsed_s', 0.0)):.2f} s"
+            "Finite-shape run finished in "
+            f"{float(result.get('elapsed_s', 0.0)):.2f} s"
         )
+
+        # Do not clear self._worker here.
+        #
+        # The thread may still be shutting down. It is cleared only by:
+        #
+        #     _on_cs_grid_worker_thread_finished()
+
+        
 
     def _save_cs_best_result_to_input(self, best: Dict[str, Any], result: Dict[str, Any]) -> None:
         """
@@ -4324,13 +6911,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 cfg_raw["refinable_parameters"][kk] = "true" if bool(v) else "false"
 
-            cfg_raw["crystallite_shape"]["mode"] = "finite_shape"
-            cfg_raw["crystallite_shape"]["search_mode"] = "predefined"
-            cfg_raw["crystallite_shape"]["diameter_cells"] = str(best.get("diameter_cells"))
-            cfg_raw["crystallite_shape"]["height_cells"] = str(best.get("height_cells"))
-            cfg_raw["crystallite_shape"]["scan_diameter"] = "false"
-            cfg_raw["crystallite_shape"]["scan_height"] = "false"
-            cfg_raw["crystallite_shape"]["diameter_infinite"] = "false"
+            axis1_cells = best.get(
+                "axis1_cells",
+                best.get(
+                    "diameter_cells",
+                    10.0,
+                ),
+            )
+
+            axis2_cells = best.get(
+                "axis2_cells",
+                axis1_cells,
+            )
+
+            axis3_cells = best.get(
+                "axis3_cells",
+                best.get(
+                    "height_cells",
+                    5.0,
+                ),
+            )
+
+            shape_section = cfg_raw[
+                "crystallite_shape"
+            ]
+
+            shape_section["mode"] = "finite_shape"
+            shape_section["search_mode"] = "predefined"
+
+            shape_section["axis1_cells"] = str(
+                axis1_cells
+            )
+
+            shape_section["axis2_cells"] = str(
+                axis2_cells
+            )
+
+            shape_section["axis3_cells"] = str(
+                axis3_cells
+            )
+
+            # Keep legacy aliases synchronized.
+            shape_section["diameter_cells"] = str(
+                axis1_cells
+            )
+
+            shape_section["height_cells"] = str(
+                axis3_cells
+            )
+
+            shape_section["scan_axis1"] = "false"
+            shape_section["scan_axis2"] = "false"
+            shape_section["scan_axis3"] = "false"
+
+            shape_section["scan_diameter"] = "false"
+            shape_section["scan_height"] = "false"
+            shape_section["diameter_infinite"] = "false"
 
             try:
                 shape_spec = getattr(self.builder, "_crystallite_shape_spec", {}) or {}
@@ -4357,6 +6993,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
             except Exception:
                 pass
+
+            _apply_best_stacking_candidate_to_parser(
+                cfg_raw,
+                best,
+            )
+
+            # Never replace a valid stacking sequence with an empty sequence.
+            if cfg_raw.has_section(
+                "layer_stacking"
+            ):
+                sequence_text = cfg_raw.get(
+                    "layer_stacking",
+                    "sequence_json",
+                    fallback="",
+                ).strip()
+
+                if sequence_text in {
+                    "",
+                    "[]",
+                }:
+                    builder_stack = dict(
+                        getattr(
+                            self.builder,
+                            "_layer_stacking_spec",
+                            {},
+                        )
+                        or {}
+                    )
+
+                    builder_sequence = builder_stack.get(
+                        "sequence",
+                        [],
+                    )
+
+                    if (
+                        isinstance(
+                            builder_sequence,
+                            list,
+                        )
+                        and builder_sequence
+                    ):
+                        cfg_raw.set(
+                            "layer_stacking",
+                            "sequence_json",
+                            json.dumps(
+                                builder_sequence,
+                                separators=(
+                                    ",",
+                                    ":",
+                                ),
+                            ),
+                        )
 
             buf = io.StringIO()
             cfg_raw.write(buf)
@@ -4579,6 +7267,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.plot_warren.clear()
         self.plot_size.clear()
+
+        try:
+            self._shape_factor_data = {}
+            self._shape_factor_selected_dirs = []
+            self._shape_factor_dir_style = {}
+            self._shape_factor_display_mode = "both"
+
+            self.plot_shape_factors.clear()
+
+        except Exception:
+            pass
 
         try:
             self._local_trends = {}
@@ -4869,6 +7568,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 from .structure_studio import StructureStudioWindow
 
+                from .timing import instrument_structure_studio_if_loaded
+
+                instrument_structure_studio_if_loaded()
+
                 self._structure_studio = StructureStudioWindow(
                     self
                 )
@@ -5088,8 +7791,19 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.param_tabs.push(
                 nfev,
-                payload.get("params", {}) or {},
-                allowed=self._refinable_allowed if self._refinable_allowed else None,
+                payload.get(
+                    "params",
+                    {},
+                )
+                or {},
+                allowed=set(
+                    getattr(
+                        self,
+                        "_refinable_allowed",
+                        set(),
+                    )
+                    or set()
+                ),
             )
         except Exception:
             pass
@@ -5795,7 +8509,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # New: cache all display arrays/metadata once.
         self._rebuild_warren_display_cache()
 
-        # Default selection uses the cache and ignores directions with <= 5 points.
+        # Default selection uses up to five direction families with the most data points.
         self._warren_selected_keys = self._default_warren_keys_min_mid_max()
 
         # Sort direction families by first distance. This corresponds to the first PDF peaks.
@@ -7725,10 +10439,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
-        self._worker = None
+        worker = self._worker
+
+        if (
+            worker is not None
+            and worker.isRunning()
+        ):
+            worker.finished.connect(
+                lambda: self._cleanup_failed_worker(
+                    worker
+                )
+            )
+
+        else:
+            self._cleanup_failed_worker(
+                worker
+            )
+
         self._update_run_button_modes()
 
         QtWidgets.QMessageBox.critical(self, "Run failed", message)
+
+    def _cleanup_failed_worker(
+        self,
+        worker,
+    ) -> None:
+        if worker is self._worker:
+            self._worker = None
+
+        try:
+            if worker is not None:
+                worker.deleteLater()
+        except Exception:
+            pass
+
+        self._update_run_button_modes()
+
 
     def closeEvent(self, event):
         try:
@@ -7805,63 +10551,67 @@ class MainWindow(QtWidgets.QMainWindow):
     def _default_warren_keys_min_mid_max(self) -> List[Tuple[int, int, int]]:
         """
         Default Warren display:
-        plot smallest, middle, and largest Warren/microstrain maxima.
 
-        Important:
-        ignore directions with <= 5 points because those are usually not
-        representative and can dominate the min/max selection incorrectly.
+        Show up to five direction families having the largest number of
+        available Warren data points.
+
+        Directions with more points are generally more representative and
+        easier to interpret than sparse direction families.
         """
-        cache = getattr(self, "_warren_display_cache", {}) or {}
-
-        y_mode = getattr(self, "_warren_y_mode", "warren")
-        max_key = "max_warren" if y_mode == "warren" else "max_microstrain"
+        cache = getattr(
+            self,
+            "_warren_display_cache",
+            {},
+        ) or {}
 
         rows = []
 
-        for d, info in cache.items():
+        for direction, info in cache.items():
             try:
-                n_points = int(info.get("n_points", 0))
+                n_points = int(
+                    info.get(
+                        "n_points",
+                        0,
+                    )
+                )
 
-                # User requested more than 5 points.
-                if n_points <= 5:
+                first_L = float(
+                    info.get(
+                        "first_L",
+                        float("inf"),
+                    )
+                )
+
+                if n_points <= 0:
                     continue
 
-                y_max = float(info.get(max_key, float("nan")))
-
-                if not np.isfinite(y_max):
-                    continue
-
-                rows.append((y_max, d))
+                rows.append(
+                    (
+                        n_points,
+                        first_L,
+                        direction,
+                    )
+                )
 
             except Exception:
                 continue
 
-        # Fallback: if no direction has > 5 points, use anything valid.
-        if not rows:
-            for d, info in cache.items():
-                try:
-                    y_max = float(info.get(max_key, float("nan")))
-
-                    if np.isfinite(y_max):
-                        rows.append((y_max, d))
-
-                except Exception:
-                    continue
-
         if not rows:
             return []
 
-        rows.sort(key=lambda x: x[0])
-
-        if len(rows) <= 3:
-            return [d for _y, d in rows]
+        # Primary ranking: largest number of available points.
+        # Secondary ranking: lower first-L distance.
+        rows.sort(
+            key=lambda row: (
+                -int(row[0]),
+                float(row[1]),
+            )
+        )
 
         return [
-            rows[0][1],
-            rows[len(rows) // 2][1],
-            rows[-1][1],
+            direction
+            for _n_points, _first_L, direction in rows[:5]
         ]
-
     def open_warren_display_options(self) -> None:
         if not getattr(self, "_warren_grouped", None):
             QtWidgets.QMessageBox.information(
@@ -8121,6 +10871,844 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_axis_limits_from_style(ax, style)
         except Exception:
             pass
+
+    def load_shape_factor_data(self) -> None:
+        """
+        Load shape-factor diagnostic data on demand.
+
+        This does not run during normal Calculate or refinement.
+
+        For finite shapes:
+            load/build the finite shell table and use cached shell_gamma.
+
+        For sphere:
+            use the analytical spherical gamma(r).
+
+        For conventional cylinder/disk:
+            calculate the analytical shell-direction common-volume gamma.
+        """
+        try:
+            from pdf_fitting.models.gr_model import PDFCalculator
+            from pdf_fitting.models.crystallite_shapes import (
+                CrystalliteShapeSpec,
+            )
+            from pdf_fitting.models.finite_shape_shells import (
+                get_or_build_finite_shell_result,
+            )
+            from pdf_fitting.fit_engine import apply_constraints
+
+            config = self._current_structure_view_configuration()
+
+            if not config:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "No input",
+                    "Load or create an input file first.",
+                )
+                return
+
+            from pdf_fitting.models.stochastic_ensemble_spec import (
+                stochastic_ensemble_spec_from_config,
+            )
+
+            ensemble_spec = (
+                stochastic_ensemble_spec_from_config(
+                    config
+                )
+            )
+
+            if ensemble_spec.use_stacking_as_bulk:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Bulk stacking mode",
+                    "Crystallite-shape factors are disabled because the "
+                    "stochastic stacking model is being used as bulk.",
+                )
+
+                return
+            
+            structure_path = str(
+                config.get(
+                    "structure_file",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not structure_path:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "No structure",
+                    "The current input does not specify a structure file.",
+                )
+                return
+
+            params = dict(
+                config.get(
+                    "initial",
+                    {},
+                )
+                or {}
+            )
+
+            if isinstance(
+                getattr(
+                    self,
+                    "_last_refined_params",
+                    None,
+                ),
+                dict,
+            ):
+                params.update(
+                    self._last_refined_params
+                )
+
+            constraints = config.get(
+                "constraints",
+                {},
+            ) or {}
+
+            if constraints:
+                params = apply_constraints(
+                    params,
+                    constraints,
+                )
+
+            r_max = float(
+                config.get(
+                    "r_max",
+                    50.0,
+                )
+            )
+
+            r_extension = float(
+                config.get(
+                    "r_extension",
+                    1.2,
+                )
+            )
+
+            pair_cutoff = (
+                r_max
+                * r_extension
+            )
+
+            shape_cfg = config.get(
+                "crystallite_shape",
+                {},
+            ) or {}
+
+            shape_mode = str(
+                shape_cfg.get(
+                    "mode",
+                    "conventional",
+                )
+            ).strip().lower()
+
+            self.statusBar().showMessage(
+                "Loading shape-factor diagnostic data..."
+            )
+
+            QtWidgets.QApplication.processEvents()
+
+            r_dummy = np.linspace(
+                0.0,
+                r_max,
+                100,
+            )
+
+            model = PDFCalculator(
+                config,
+                structure_path,
+                r_dummy,
+                pair_cutoff=pair_cutoff,
+            )
+
+            if shape_mode == "finite_shape":
+                shape_spec = CrystalliteShapeSpec.from_dict(
+                    shape_cfg
+                )
+
+                from pdf_fitting.models.layer_stacking import (
+                    stacking_spec_from_config,
+                )
+
+                from pdf_fitting.models.dynamic_stacked_model import (
+                    DynamicStackedPdfModel,
+                )
+
+                stack_spec = stacking_spec_from_config(
+                    config
+                )
+
+
+                if stack_spec.enabled:
+                    topology_margin = float(
+                        (
+                            config.get(
+                                "refinement",
+                                {},
+                            )
+                            or {}
+                        ).get(
+                            "stacked_topology_margin",
+                            3.0,
+                        )
+                    )
+
+                    model = DynamicStackedPdfModel(
+                        pdf_calculator=model,
+                        source_structure=(
+                            model
+                            .structure_handler
+                            .structure
+                        ),
+                        shape_spec=shape_spec,
+                        stack_spec=stack_spec,
+                        pair_cutoff=float(
+                            pair_cutoff
+                        ),
+                        topology_margin=topology_margin,
+                        reference_parameters=params,
+                    )
+
+                else:
+                    finite_result = get_or_build_finite_shell_result(
+                        model.structure_handler.structure,
+                        pair_cutoff=float(
+                            pair_cutoff
+                        ),
+                        shape_spec=shape_spec,
+                        refinement_config=(
+                            config.get(
+                                "refinement",
+                                {},
+                            )
+                            or {}
+                        ),
+                        boundary_mode="atom",
+                    )
+
+                    model.replace_shell_table(
+                        finite_result.shell_table,
+                        device_shell_table=(
+                            finite_result.device_shell_table
+                        ),
+                    )
+
+            data = model.build_shape_factor_directions(
+                params,
+                max_r=r_max,
+                include_interpolated=True,
+            )
+
+            if not data.get(
+                "directions",
+                {},
+            ):
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "No shape-factor data",
+                    "No finite or analytical crystallite shape factor is active "
+                    "for the current input.",
+                )
+                return
+
+            self._shape_factor_data = data
+            self._shape_factor_model_kind = str(
+                data.get(
+                    "mode",
+                    "",
+                )
+            )
+
+            valid_dirs = list(
+                data.get(
+                    "directions",
+                    {},
+                ).keys()
+            )
+
+            if data.get(
+                "isotropic",
+                False,
+            ):
+                self._shape_factor_selected_dirs = [
+                    (0, 0, 0),
+                ]
+
+            else:
+                ranked_dirs = sorted(
+                    valid_dirs,
+                    key=lambda direction: int(
+                        (
+                            data["directions"].get(
+                                direction,
+                                {},
+                            )
+                            or {}
+                        ).get(
+                            "n_shell_rows",
+                            0,
+                        )
+                    ),
+                    reverse=True,
+                )
+
+                self._shape_factor_selected_dirs = ranked_dirs[
+                    :5
+                ]
+
+            self._refresh_shape_factor_plot()
+
+            self.tabs.setCurrentWidget(
+                self.plot_shape_factors
+            )
+
+            metadata = data.get(
+                "metadata",
+                {},
+            ) or {}
+
+            self.statusBar().showMessage(
+                "Shape factors loaded: "
+                f"mode={data.get('mode', 'unknown')}, "
+                f"directions={len(valid_dirs)}, "
+                f"shape={metadata.get('shape_type', '')}"
+            )
+
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Shape-factor loading failed",
+                str(exc),
+            )
+
+    def _shape_factor_label(
+        self,
+        direction,
+    ) -> str:
+        if direction == (0, 0, 0):
+            return "Isotropic sphere"
+
+        try:
+            h, k, l = direction
+            return f"[{int(h)} {int(k)} {int(l)}]"
+        except Exception:
+            return str(direction)
+
+    def _refresh_shape_factor_plot(self) -> None:
+        """
+        Draw selected directional gamma curves in the Shape Factors tab.
+        """
+        plot = self.plot_shape_factors
+        plot.clear()
+
+        data = getattr(
+            self,
+            "_shape_factor_data",
+            {},
+        ) or {}
+
+        directions_data = data.get(
+            "directions",
+            {},
+        ) or {}
+
+        if not directions_data:
+            plot.show_message(
+                "No shape-factor data loaded.\n\n"
+                "Press 'Reload shape factors' after Calculate or after defining "
+                "a crystallite shape."
+            )
+            return
+
+        model_kind = str(
+            data.get(
+                "mode",
+                "unknown",
+            )
+        )
+
+        if model_kind == "finite_shape":
+            plot.set_title(
+                "Finite atomistic directional shape factors"
+            )
+        elif model_kind == "sphere":
+            plot.set_title(
+                "Analytical spherical shape factor"
+            )
+        elif model_kind == "cylinder":
+            plot.set_title(
+                "Analytical cylinder/disk directional shape factors"
+            )
+        else:
+            plot.set_title(
+                "Crystallite shape factors"
+            )
+
+        plot.set_xlabel(
+            "Pair distance r (Å)"
+        )
+
+        plot.set_ylabel(
+            "Shape factor γ(r)"
+        )
+
+        selected = list(
+            getattr(
+                self,
+                "_shape_factor_selected_dirs",
+                [],
+            )
+            or []
+        )
+
+        if not selected:
+            selected = list(
+                directions_data.keys()
+            )[:5]
+
+        show_symbols = bool(
+            getattr(
+                self,
+                "_shape_factor_show_symbols",
+                True,
+            )
+        )
+
+        show_lines = bool(
+            getattr(
+                self,
+                "_shape_factor_show_lines",
+                True,
+            )
+        )
+
+        style_map = getattr(
+            self,
+            "_shape_factor_dir_style",
+            {},
+        ) or {}
+
+        plotted = False
+
+        for index, direction in enumerate(
+            selected
+        ):
+            info = directions_data.get(
+                direction,
+                None,
+            )
+
+            if not isinstance(
+                info,
+                dict,
+            ):
+                continue
+
+            style = style_map.get(
+                direction,
+                {},
+            ) or {}
+
+            color = _safe_mpl_color(
+                style.get(
+                    "color",
+                    "",
+                ),
+                _COLOR_CYCLE[
+                    index
+                    % len(
+                        _COLOR_CYCLE
+                    )
+                ],
+            )
+
+            label = self._shape_factor_label(
+                direction
+            )
+
+            line_style = str(
+                style.get(
+                    "linestyle",
+                    "-",
+                )
+            )
+
+            marker = str(
+                style.get(
+                    "marker",
+                    "o",
+                )
+            )
+
+            width = float(
+                style.get(
+                    "linewidth",
+                    1.5,
+                )
+            )
+
+            marker_size = float(
+                style.get(
+                    "markersize",
+                    5.0,
+                )
+            )
+
+            # -----------------------------------------------------
+            # Finite shape values are discrete shell gamma values.
+            #
+            # Default:
+            #
+            #     marker="o"
+            #     line="-"
+            #
+            # The user can independently disable symbols or lines.
+            # -----------------------------------------------------
+            r_values = np.asarray(
+                info.get(
+                    "r",
+                    [],
+                ),
+                dtype=float,
+            )
+
+            gamma_values = np.asarray(
+                info.get(
+                    "gamma",
+                    [],
+                ),
+                dtype=float,
+            )
+
+            valid = (
+                np.isfinite(
+                    r_values
+                )
+                & np.isfinite(
+                    gamma_values
+                )
+            )
+
+            if not np.any(
+                valid
+            ):
+                continue
+
+            if show_lines:
+                use_line_style = line_style
+
+                if use_line_style in (
+                    "",
+                    "None",
+                    "none",
+                ):
+                    use_line_style = "-"
+
+            else:
+                use_line_style = "None"
+
+            if show_symbols:
+                use_marker = marker
+
+                if use_marker in (
+                    "",
+                    "None",
+                    "none",
+                ):
+                    use_marker = "o"
+
+            else:
+                use_marker = None
+
+            # Analytical sphere is already calculated on a dense continuous
+            # r-grid. Display it as a line unless the user explicitly changes
+            # the direction style later.
+            if model_kind == "sphere":
+                use_marker = None
+
+                if not show_lines:
+                    use_line_style = "None"
+
+            plot.add_curve(
+                r_values[
+                    valid
+                ],
+                gamma_values[
+                    valid
+                ],
+                color=color,
+                width=width,
+                name=label,
+                symbol=use_marker,
+                symbol_size=marker_size,
+                style=use_line_style,
+            )
+
+            plotted = True
+
+        if not plotted:
+            plot.show_message(
+                "No selected shape-factor curves can be plotted."
+            )
+            return
+
+        # Reference line gamma = 1.
+        max_r = 1.0
+
+        for info in directions_data.values():
+            try:
+                rr = np.asarray(
+                    info.get(
+                        "r_interpolated",
+                        info.get(
+                            "r",
+                            [],
+                        ),
+                    ),
+                    dtype=float,
+                )
+
+                if rr.size:
+                    max_r = max(
+                        max_r,
+                        float(
+                            np.nanmax(
+                                rr
+                            )
+                        ),
+                    )
+            except Exception:
+                pass
+
+        plot.add_curve(
+            np.asarray(
+                [
+                    0.0,
+                    max_r,
+                ],
+                dtype=float,
+            ),
+            np.asarray(
+                [
+                    1.0,
+                    1.0,
+                ],
+                dtype=float,
+            ),
+            color="#606060",
+            width=1.0,
+            name="γ = 1",
+            style=":",
+            alpha=0.65,
+        )
+
+        plot.auto_range()
+
+        try:
+            plot.set_y_range(
+                -0.05,
+                1.05,
+            )
+        except Exception:
+            pass
+
+    def open_shape_factor_display_options(self) -> None:
+        if not getattr(
+            self,
+            "_shape_factor_data",
+            None,
+        ):
+            QtWidgets.QMessageBox.information(
+                self,
+                "No shape-factor data",
+                "Press 'Reload shape factors' first.",
+            )
+            return
+
+        dialog = ShapeFactorDisplayOptionsDialog(
+            self
+        )
+
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            dialog.apply_to_owner()
+            self._refresh_shape_factor_plot()
+
+    def save_shape_factor_data(self) -> None:
+        data = getattr(
+            self,
+            "_shape_factor_data",
+            {},
+        ) or {}
+
+        directions = data.get(
+            "directions",
+            {},
+        ) or {}
+
+        selected = list(
+            getattr(
+                self,
+                "_shape_factor_selected_dirs",
+                [],
+            )
+            or []
+        )
+
+        if not directions or not selected:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No shape-factor data",
+                "No selected shape-factor curves are available to save.",
+            )
+            return
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save shape-factor data",
+            "shape_factors.txt",
+            "Text files (*.txt);;CSV files (*.csv);;All files (*)",
+        )
+
+        if not path:
+            return
+
+        try:
+            with open(
+                path,
+                "w",
+                encoding="utf-8",
+            ) as file:
+                file.write(
+                    "# Shape-factor diagnostic data\n"
+                )
+
+                file.write(
+                    f"# Model mode: {data.get('mode', '')}\n"
+                )
+
+                file.write(
+                    "# direction\tr_A\tgamma_discrete\n"
+                )
+
+                for direction in selected:
+                    info = directions.get(
+                        direction,
+                        {},
+                    ) or {}
+
+                    r_values = np.asarray(
+                        info.get(
+                            "r",
+                            [],
+                        ),
+                        dtype=float,
+                    )
+
+                    gamma_values = np.asarray(
+                        info.get(
+                            "gamma",
+                            [],
+                        ),
+                        dtype=float,
+                    )
+
+                    label = self._shape_factor_label(
+                        direction
+                    )
+
+                    for r_value, gamma_value in zip(
+                        r_values,
+                        gamma_values,
+                    ):
+                        file.write(
+                            f"{label}\t"
+                            f"{float(r_value):.10g}\t"
+                            f"{float(gamma_value):.10g}\n"
+                        )
+
+            self.statusBar().showMessage(
+                f"Saved shape-factor data: {path}"
+            )
+
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Save shape-factor data failed",
+                str(exc),
+            )
+
+    def open_shape_factor_plot_window(self) -> None:
+        if not getattr(
+            self,
+            "_shape_factor_data",
+            None,
+        ):
+            QtWidgets.QMessageBox.information(
+                self,
+                "No shape-factor data",
+                "Press 'Reload shape factors' first.",
+            )
+            return
+
+        dialog = QtWidgets.QDialog(
+            self
+        )
+
+        dialog.setWindowTitle(
+            "Crystallite shape factors"
+        )
+
+        dialog.setWindowFlags(
+            dialog.windowFlags()
+            | Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+
+        dialog.resize(
+            1100,
+            720,
+        )
+
+        plot = FastLinePlot(
+            title="Crystallite shape factors",
+            xlabel="Pair distance r (Å)",
+            ylabel="Shape factor γ(r)",
+        )
+
+        layout = QtWidgets.QVBoxLayout(
+            dialog
+        )
+
+        layout.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
+
+        layout.addWidget(
+            plot
+        )
+
+        old_plot = self.plot_shape_factors
+
+        try:
+            self.plot_shape_factors = plot
+            self._refresh_shape_factor_plot()
+        finally:
+            self.plot_shape_factors = old_plot
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        self._shape_factor_dialog_window = dialog
+
 
     def open_local_display_options(self) -> None:
         if not getattr(self, "_local_trends", None):
@@ -8579,330 +12167,216 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _update_cs_grid_plots(self) -> None:
-        """
-        Update GPU-capable crystallite-shape grid-search plots.
+        self.cs_results_explorer.set_results(
+            self._cs_results
+        )
 
-        Plots:
-            1. Best Rwp versus diameter.
-            2. Best Rwp versus axis length.
-            3. Rwp heatmap over diameter and axis length.
+    def _current_shape_search_mode(self) -> str:
         """
-        rows = list(
-            getattr(
-                self,
-                "_cs_results",
+        Return the finite-shape search mode.
+
+        When the Builder is active, read the Builder state directly. Do not
+        serialize and reparse all atomic-site parameters.
+        """
+        try:
+            if (
+                hasattr(self, "builder")
+                and self.builder is not None
+                and self.left_tabs.currentWidget() is self.builder
+            ):
+                shape_spec = dict(
+                    getattr(
+                        self.builder,
+                        "_crystallite_shape_spec",
+                        {},
+                    )
+                    or {}
+                )
+
+                return str(
+                    shape_spec.get(
+                        "search_mode",
+                        "predefined",
+                    )
+                ).strip().lower()
+
+        except Exception:
+            pass
+
+        try:
+            cfg = self._parse_raw_to_dict()
+
+            if not cfg:
+                return "predefined"
+
+            shape_cfg = (
+                cfg.get(
+                    "crystallite_shape",
+                    {},
+                )
+                or {}
+            )
+
+            return str(
+                shape_cfg.get(
+                    "search_mode",
+                    "predefined",
+                )
+            ).strip().lower()
+
+        except Exception:
+            return "predefined"
+
+    def _on_cs_candidate_selected(
+        self,
+        row: Dict[str, Any],
+    ) -> None:
+        if not isinstance(
+            row,
+            dict,
+        ):
+            return
+
+        self.statusBar().showMessage(
+            "Selected candidate: "
+            f"Rwp={_float_value(row.get('rwp')):.5g}%, "
+            f"u={_float_value(row.get('stacking_u')):.6g}, "
+            f"v={_float_value(row.get('stacking_v')):.6g}, "
+            f"spacing="
+            f"{_float_value(row.get('stacking_distance')):.6g} Å"
+        )
+
+
+    def _apply_selected_cs_candidate(
+        self,
+        row: Dict[str, Any],
+    ) -> None:
+        if not isinstance(
+            row,
+            dict,
+        ):
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Apply selected stacking candidate",
+            "Apply this candidate to the current input?\n\n"
+            f"Rwp = {_float_value(row.get('rwp')):.5g}%\n"
+            f"u = {_float_value(row.get('stacking_u')):.7g}\n"
+            f"v = {_float_value(row.get('stacking_v')):.7g}\n"
+            f"spacing = "
+            f"{_float_value(row.get('stacking_distance')):.7g} Å",
+            QtWidgets.QMessageBox.Yes
+            | QtWidgets.QMessageBox.No,
+        )
+
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+
+        result_wrapper = {
+            "refinable_flags": dict(
+                row.get(
+                    "refinable_flags",
+                    {},
+                )
+                or {}
+            )
+        }
+
+        self._save_cs_best_result_to_input(
+            row,
+            result_wrapper,
+        )
+
+
+    def _open_cs_results_window(
+        self,
+        payload,
+    ) -> None:
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return
+
+        dialog = QtWidgets.QDialog(
+            self
+        )
+
+        dialog.setWindowTitle(
+            "Stacking search results"
+        )
+
+        dialog.setWindowFlags(
+            dialog.windowFlags()
+            | Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+
+        dialog.resize(
+            1350,
+            850,
+        )
+
+        explorer = CSResultsExplorer(
+            dialog,
+            allow_separate_window=False,
+        )
+
+        explorer.set_results(
+            payload.get(
+                "results",
                 [],
             )
             or []
         )
 
-        if not rows:
-            self.plot_cs_diameter.clear()
-            self.plot_cs_height.clear()
-            self.plot_cs_map.clear()
-            return
-
-        diameter = np.asarray(
-            [
-                row.get(
-                    "diameter_cells",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
+        selected = payload.get(
+            "selected"
         )
 
-        height = np.asarray(
-            [
-                row.get(
-                    "height_cells",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
-        )
-
-        rwp = np.asarray(
-            [
-                row.get(
-                    "rwp",
-                    np.nan,
-                )
-                for row in rows
-            ],
-            dtype=float,
-        )
-
-        valid = (
-            np.isfinite(height)
-            & np.isfinite(rwp)
-        )
-
-        diameter_valid = (
-            valid
-            & np.isfinite(diameter)
-        )
-
-        self.plot_cs_diameter.clear()
-        self.plot_cs_diameter.set_title(
-            "Final Rwp vs diameter"
-        )
-        self.plot_cs_diameter.set_xlabel(
-            "Diameter / unit cells"
-        )
-        self.plot_cs_diameter.set_ylabel(
-            "Best Rwp (%)"
-        )
-
-        if np.any(diameter_valid):
-            unique_diameter = np.asarray(
-                sorted(
-                    set(
-                        diameter[diameter_valid].tolist()
-                    )
-                ),
-                dtype=float,
-            )
-
-            best_rwp_by_diameter = np.asarray(
-                [
-                    float(
-                        np.nanmin(
-                            rwp[
-                                diameter_valid
-                                & np.isclose(
-                                    diameter,
-                                    diameter_value,
-                                )
-                            ]
-                        )
-                    )
-                    for diameter_value in unique_diameter
-                ],
-                dtype=float,
-            )
-
-            self.plot_cs_diameter.add_curve(
-                unique_diameter,
-                best_rwp_by_diameter,
-                color="#1f77b4",
-                width=2.0,
-                symbol="o",
-                symbol_size=7.0,
-                style="-",
-                name="Best Rwp",
-            )
-
-            self.plot_cs_diameter.auto_range()
-
-        else:
-            self.plot_cs_diameter.show_message(
-                "Diameter is treated as infinite."
-            )
-
-        self.plot_cs_height.clear()
-        self.plot_cs_height.set_title(
-            "Final Rwp vs axis length"
-        )
-        self.plot_cs_height.set_xlabel(
-            "Axis length / unit cells"
-        )
-        self.plot_cs_height.set_ylabel(
-            "Best Rwp (%)"
-        )
-
-        if np.any(valid):
-            unique_height = np.asarray(
-                sorted(
-                    set(
-                        height[valid].tolist()
-                    )
-                ),
-                dtype=float,
-            )
-
-            best_rwp_by_height = np.asarray(
-                [
-                    float(
-                        np.nanmin(
-                            rwp[
-                                valid
-                                & np.isclose(
-                                    height,
-                                    height_value,
-                                )
-                            ]
-                        )
-                    )
-                    for height_value in unique_height
-                ],
-                dtype=float,
-            )
-
-            self.plot_cs_height.add_curve(
-                unique_height,
-                best_rwp_by_height,
-                color="#d62728",
-                width=2.0,
-                symbol="o",
-                symbol_size=7.0,
-                style="-",
-                name="Best Rwp",
-            )
-
-            self.plot_cs_height.auto_range()
-
-        else:
-            self.plot_cs_height.show_message(
-                "No valid axis-length results."
-            )
-
-        self.plot_cs_map.clear()
-        self.plot_cs_map.set_title(
-            "CS grid search Rwp map"
-        )
-        self.plot_cs_map.set_xlabel(
-            "Diameter / unit cells"
-        )
-        self.plot_cs_map.set_ylabel(
-            "Axis length / unit cells"
-        )
-
-        if not np.any(diameter_valid):
-            return
-
-        unique_diameter = np.asarray(
-            sorted(
-                set(
-                    diameter[diameter_valid].tolist()
-                )
-            ),
-            dtype=float,
-        )
-
-        unique_height = np.asarray(
-            sorted(
-                set(
-                    height[diameter_valid].tolist()
-                )
-            ),
-            dtype=float,
-        )
-
-        z_values = np.full(
-            (
-                unique_height.size,
-                unique_diameter.size,
-            ),
-            np.nan,
-            dtype=float,
-        )
-
-        for diameter_value, height_value, rwp_value in zip(
-            diameter[diameter_valid],
-            height[diameter_valid],
-            rwp[diameter_valid],
+        if isinstance(
+            selected,
+            dict,
         ):
-            diameter_index = int(
-                np.argmin(
-                    np.abs(
-                        unique_diameter
-                        - diameter_value
-                    )
-                )
+            explorer.select_candidate(
+                selected
             )
 
-            height_index = int(
-                np.argmin(
-                    np.abs(
-                        unique_height
-                        - height_value
-                    )
-                )
-            )
+        explorer.applyCandidateRequested.connect(
+            self._apply_selected_cs_candidate
+        )
 
-            previous = z_values[
-                height_index,
-                diameter_index,
-            ]
+        explorer.candidateSelected.connect(
+            self._on_cs_candidate_selected
+        )
 
-            if (
-                not np.isfinite(previous)
-                or rwp_value < previous
-            ):
-                z_values[
-                    height_index,
-                    diameter_index,
-                ] = float(
-                    rwp_value
-                )
+        layout = QtWidgets.QVBoxLayout(
+            dialog
+        )
 
-        if (
-            unique_diameter.size >= 2
-            and unique_height.size >= 2
-        ):
-            self.plot_cs_map.set_grid(
-                unique_diameter,
-                unique_height,
-                z_values,
-            )
+        layout.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
 
-        else:
-            self.plot_cs_map.set_points(
-                diameter[diameter_valid],
-                height[diameter_valid],
-                rwp[diameter_valid],
-            )
+        layout.addWidget(
+            explorer
+        )
 
-    def _current_shape_search_mode(self) -> str:
-        try:
-            if hasattr(self, "builder") and self.builder is not None:
-                spec = getattr(self.builder, "_crystallite_shape_spec", {}) or {}
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
-                if spec:
-                    return str(spec.get("search_mode", "grid_search")).strip().lower()
-        except Exception:
-            pass
-
-        try:
-            txt = self.raw_editor.toPlainText()
-
-            if self.left_tabs.currentWidget() is self.builder:
-                txt = self._compose_input_text_for_run()
-
-            if not txt.strip():
-                return "grid_search"
-
-            tmp = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".inp",
-                mode="w",
-                encoding="utf-8",
-            )
-            tmp.write(txt)
-            tmp.flush()
-            tmp.close()
-
-            try:
-                cfg = read_input_file(tmp.name)
-            finally:
-                try:
-                    os.unlink(tmp.name)
-                except Exception:
-                    pass
-
-            shape_cfg = cfg.get("crystallite_shape", {}) or {}
-            return str(shape_cfg.get("search_mode", "grid_search")).strip().lower()
-
-        except Exception:
-            return "grid_search"
-
-    
+        self._cs_results_dialog = dialog
 
 def main():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     w = MainWindow()
     w.showMaximized()
     app.exec()
+

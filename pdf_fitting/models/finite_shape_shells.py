@@ -352,8 +352,11 @@ FINITE_CACHE_DIR = user_cache_dir(
     "finite_shape_cache"
 )
 
-FINITE_CATALOG_CACHE_VERSION = "finite_pair_catalog_v4_image_map"
-FINITE_SHELL_CACHE_VERSION = "finite_shape_shell_table_v3_direct_atom_coordination_with_gamma"
+FINITE_CATALOG_CACHE_VERSION = "finite_pair_catalog_v5_exact_directions"
+FINITE_SHELL_CACHE_VERSION = (
+    "finite_shape_shell_table_v4_"
+    "atom_coordination_gamma_axis123_cuda_mask"
+)
 
 
 # -----------------------------------------------------------------------------
@@ -366,6 +369,23 @@ def clean_element_name(name: str) -> str:
     sym = m.group(1)
     return sym.upper() if len(sym) == 1 else sym[0].upper() + sym[1:].lower()
 
+def site_element_symbol(site) -> str:
+    """
+    Return a clean element symbol for an ordered or partially occupied site.
+    """
+    try:
+        return clean_element_name(
+            str(
+                next(
+                    iter(site.species)
+                )
+            ).strip()
+        )
+    except Exception:
+        return clean_element_name(
+            str(site.species_string)
+        )
+    
 
 def lambda_safe_species_label(name: str) -> str:
     s = str(name).strip()
@@ -601,7 +621,10 @@ def get_or_build_all_site_pair_catalog(
     frac_sites = np.asarray(structure.frac_coords, dtype=float)
     n_sites = int(frac_sites.shape[0])
 
-    species_element_all = [clean_element_name(str(s.specie)) for s in structure.sites]
+    species_element_all = [
+        site_element_symbol(site)
+        for site in structure.sites
+    ]
     unique_species = sorted(set(species_element_all))
     sp_index = {s: i for i, s in enumerate(unique_species)}
     site_species_id = np.asarray([sp_index[s] for s in species_element_all], dtype=np.int16)
@@ -611,7 +634,12 @@ def get_or_build_all_site_pair_catalog(
         minlength=len(unique_species),
     ).astype(np.int64)
 
-    species_lambda_all = [lambda_safe_species_label(str(s.specie)) for s in structure.sites]
+    species_lambda_all = [
+        lambda_safe_species_label(
+            site_element_symbol(site)
+        )
+        for site in structure.sites
+    ]
     unique_lambda_species = sorted(set(species_lambda_all))
     lambda_sp_index = {s: i for i, s in enumerate(unique_lambda_species)}
     site_lambda_id = np.asarray([lambda_sp_index[s] for s in species_lambda_all], dtype=np.int16)
@@ -808,6 +836,12 @@ def get_or_build_all_site_pair_catalog(
             pair_alpha_id[pid] = alpha_id[r0]
             pair_beta_id[pid] = beta_id[r0]
 
+    # Exact reciprocal direction parallel to the pair vector (direction_utils).
+    if len(frac) > 0:
+        from pdf_fitting.models.direction_utils import reciprocal_directions
+
+        direction = reciprocal_directions(np.asarray(frac, dtype=np.float64) @ M, M)
+
     catalog = {
     "center_site": center_site,
     "neighbor_site": neighbor_site,
@@ -923,9 +957,55 @@ def build_cell_mask_for_shape(
 
     M = np.asarray(structure.lattice.matrix, dtype=float)
 
+    axis1_cells = float(
+        getattr(
+            shape_spec,
+            "axis1_cells",
+            shape_spec.diameter_cells,
+        )
+    )
+
+    axis2_cells = float(
+        getattr(
+            shape_spec,
+            "axis2_cells",
+            shape_spec.diameter_cells,
+        )
+    )
+
+    axis3_cells = float(
+        getattr(
+            shape_spec,
+            "axis3_cells",
+            shape_spec.height_cells,
+        )
+    )
+
+    shape_type = str(
+        shape_spec.shape_type
+    ).strip().lower()
+
+    # Sphere has one diameter in every direction.
+    if shape_type in (
+        "sphere",
+        "spherical",
+    ):
+        axis2_cells = axis1_cells
+        axis3_cells = axis1_cells
+
+    # Cylinder/disk has a circular base.
+    elif shape_type in (
+        "cylinder",
+        "disk",
+        "disk-like",
+        "disk_like",
+    ):
+        axis2_cells = axis1_cells
+
     max_dim = max(
-        float(shape_spec.diameter_cells),
-        float(shape_spec.height_cells),
+        axis1_cells,
+        axis2_cells,
+        axis3_cells,
         1.0,
     )
 
@@ -965,7 +1045,10 @@ def build_cell_mask_for_shape(
             cell_inside |= inside
 
     site_species = np.asarray(
-        [clean_element_name(str(site.specie)) for site in structure.sites],
+        [
+            site_element_symbol(site)
+            for site in structure.sites
+        ],
         dtype=object,
     )
 
@@ -2073,3 +2156,103 @@ def get_or_build_finite_shell_table(
     )
 
     return shell_table
+
+def get_or_build_finite_shell_result(
+    structure: Structure,
+    pair_cutoff: float,
+    shape_spec: CrystalliteShapeSpec,
+    *,
+    stack_spec=None,
+    refinement_config: Dict[str, Any] | None = None,
+    boundary_mode: str = "atom",
+):
+    """
+    Backend-aware finite-shell construction.
+
+    shell_backend is read from refinement_config:
+
+        cpu
+        cuda
+        auto
+
+    The returned object has:
+
+        result.shell_table
+        result.device_shell_table
+        result.backend
+        result.cache_hit
+        result.build_seconds
+    """
+    from pdf_fitting.models.gpu.finite_shape_backend import (
+        get_or_build_finite_shape_result,
+    )
+
+    return get_or_build_finite_shape_result(
+        structure=structure,
+        pair_cutoff=float(
+            pair_cutoff
+        ),
+        shape_spec=shape_spec,
+        stack_spec=stack_spec,
+        refinement_config=refinement_config
+        or {},
+        boundary_mode=boundary_mode,
+    )
+
+
+def get_or_build_configured_finite_shell_result(
+    structure: Structure,
+    pair_cutoff: float,
+    config: Dict[str, Any],
+    *,
+    shape_spec: CrystalliteShapeSpec | None = None,
+    boundary_mode: str = "atom",
+):
+    """
+    Build the correct finite shell table from the complete application config.
+
+    Periodic stacking enabled
+        Use the fixed-geometry CPU stacked backend.
+
+    Periodic stacking disabled
+        Use the existing conventional CPU/CUDA finite-shape backend.
+    """
+    from pdf_fitting.models.layer_stacking import (
+        stacking_spec_from_config,
+    )
+
+    from pdf_fitting.models.crystallite_shapes import (
+        shape_spec_from_config,
+    )
+
+    if shape_spec is None:
+        shape_spec = shape_spec_from_config(
+            config
+        )
+
+    stack_spec = stacking_spec_from_config(
+        config
+    )
+
+    refinement_config = dict(
+        config.get(
+            "refinement",
+            {},
+        )
+        or {}
+    )
+
+    return get_or_build_finite_shell_result(
+        structure=structure,
+        pair_cutoff=float(
+            pair_cutoff
+        ),
+        shape_spec=shape_spec,
+        stack_spec=(
+            stack_spec
+            if stack_spec.enabled
+            else None
+        ),
+        refinement_config=refinement_config,
+        boundary_mode=boundary_mode,
+    )

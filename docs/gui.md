@@ -1,128 +1,196 @@
 # Graphical Interface
 
-## Builder and raw input
+HKL-PDF opens the **project window**, which supports several datasets and
+several phases per dataset. The previous single-phase window is still
+available as the **classic window**.
 
-The left side contains:
+```bash
+python -m pdf_fitting.gui                    # project window
+python -m pdf_fitting.gui project.json       # ... and open a project
+python -m pdf_fitting.gui old_input.inp      # ... or import an .inp file
+python -m pdf_fitting.gui --classic          # classic single-phase window
+```
 
-- **Builder** — structured input editor;
-- **Raw input** — generated INI text.
+The classic window can also be opened from **View › Classic window**.
 
-The Builder updates the raw input while preserving parameters that are not
-currently exposed in a visible table.
+## Layout
 
-## Main actions
+```text
+┌──────────────────────────────────────────────────────────┬──────────────┐
+│ Toolbar: Open · Save · +Dataset · +Phase · Calculate ·   │  Rwp and     │
+│          Refine · Stop                                    │  phase       │
+│ Chips:   state · Rwp · refined count · CPU/GPU backends  │  fractions   │
+├──────────────────────┬───────────────────────────────────┴──────────────┤
+│ Project tree         │ Editor page for the selected tree node           │
+│                      │                                                  │
+└──────────────────────┴──────────────────────────────────────────────────┘
+```
 
-### Calculate
+- The **toolbar** holds the project and calculation actions.
+  Shortcuts: **F5** Calculate, **F6** Refine, **Esc** Stop, **Ctrl+S** Save.
+- The **chips** show the worker state, the current $R_\mathrm{wp}$, the
+  number of parameters flagged for refinement, and the selected shell and
+  PDF backends (CPU or CUDA).
+- The **progress panel** at the top right plots $R_\mathrm{wp}$ and the
+  phase weight fractions against the function-evaluation count. It is
+  shared by all phases.
+- The **project tree** on the left selects the editor page on the right.
+  The number beside a node is the count of parameters flagged for
+  refinement below it.
 
-Calculates the PDF once without refinement.
+## Project tree
 
-### Run
+```text
+Refinement settings
+Constraints
+Refined parameters
+<Dataset>
+├── Data & range
+├── Instrument
+└── <Phase>
+    ├── Structure (3D)
+    ├── Lattice
+    ├── Atoms & occupancy
+    ├── Microstructure
+    ├── Local dynamics
+    ├── Shape & stacking
+    ├── SAXS
+    ├── Peak widths (free fit)
+    └── Results
+```
 
-Starts conventional least-squares refinement.
+Right-click a dataset or phase for more actions: add a phase from a CIF or
+an `.inp` file, duplicate a dataset with the same phases, duplicate a phase,
+copy a phase to the other datasets, or remove it.
 
-### Run finite-shape fit
+Phases can be made inactive. An inactive phase stays in the project but is
+not calculated.
 
-Runs one predefined finite shape.
+## Parameter grid
 
-### Run CS grid search
+Every page that holds parameters uses the same grid:
 
-Runs a discrete crystallite-shape search.
+| Column | Meaning |
+|---|---|
+| Value | Current value |
+| Refine | Include the parameter in the least-squares fit |
+| Min / Max | Bounds used during refinement |
+| Esd | Estimated standard deviation from the last esd calculation |
 
-### Pause
+## Pages
 
-Temporarily pauses the worker.
+### Refinement settings
 
-### Stop/Save
+These settings apply to the whole project:
 
-Stops the current calculation. The best parameters seen by the worker can
-optionally be saved.
+- **Strategy and tolerances:** staged refinement, evaluation budgets,
+  `ftol`, `xtol`, `gtol`, the coarse refinement $r$ step, and the robust
+  loss function.
+- **Backends:** CPU or CUDA for shell generation and PDF accumulation, the
+  GPU device, the GPU memory fraction, and the number of Numba threads.
+  See [GPU acceleration](gpu.md).
+- **After the fit:** pair contributions, Warren analysis, local trends,
+  export of the finite coordination, and the
+  [esd and correlation-matrix calculation](uncertainties.md).
 
-## Parameter tables
+### Constraints
 
-A normal parameter table contains:
+Constraints tie one parameter to an expression of others. Names are
+namespaced by dataset and phase, for example:
 
-- parameter name;
-- value;
-- lower bound;
-- upper bound;
-- refinement checkbox.
+```text
+ds1.fe_bcc_300k.re = ds1.fe_bcc_300k.d
+```
 
-Local-dynamics tables also contain a **Use?** checkbox. When disabled, the
-parameter is removed from the generated input.
+See [Project files](project-format.md#constraints).
 
-## Size models
+### Refined parameters
 
-The GUI provides:
+This page lists every refined parameter with its value, bounds, and esd.
 
-- spherical;
-- cylinder/disk;
-- finite crystallite shape.
+After an esd calculation, the page also shows:
 
-The finite-shape dialog contains:
+- the correlation-matrix heat map;
+- a table of the strongest correlations.
 
-- shape type;
-- fixed or grid-search mode;
-- dimensions;
-- orientation vectors;
-- OpenGL preview;
-- XYZ export.
+**Compute esds now** calculates them for the current parameter values
+without refining again.
 
-## Microstrain models
+### Dataset pages
 
-Available models are:
+- **Dataset node:** the fit plot of the dataset (all phases).
+- **Data & range:** the experimental file, $r_\mathrm{min}$,
+  $r_\mathrm{max}$, and the pair-generation extension.
+- **Instrument:** `qdamp`, `delta_broad`, `qmax`, and the $Q_\mathrm{max}$
+  termination options. These are shared by every phase of the dataset.
 
-- isotropic;
-- Wilkens;
-- PAH.
+### Phase pages
 
-The contrast-factor panel becomes available for directional strain models.
+- **Overview:** the scale factor and the derived weight fraction.
+- **Structure (3D):** the interactive structure editor.
+  See [Structure editor](structure-editor.md).
+- **Lattice:** the cell parameters. Symmetry constraints such as $b = a$
+  are applied automatically.
+- **Atoms & occupancy:** coordinates, occupancies, Biso, and anisotropic
+  displacement parameters. See [Anisotropic ADPs](adp.md).
+- **Microstructure:** crystallite size, cylinder or disk size, the
+  microstrain model, and contrast factors. Laue-class invariant terms are
+  listed by name, and **Import contrast factors…** reads them from a file.
+  See [Microstrain](microstrain.md).
+- **Local dynamics:** the correlated-motion parameters
+  $\delta_1$, $\delta_2$, and the per-pair $\lambda$ values.
+- **Shape & stacking:** opens the crystallite and stacking builder, switches
+  back to the conventional (bulk) model, or starts a crystallite-shape grid
+  search. See [Stacking faults](stacking-faults.md).
+- **SAXS:** the optional missing-low-$Q$ term. See
+  [SAXS model](saxs-model.md).
+- **Peak widths (free fit):** fits every peak freely and analyses the
+  widths per crystallographic direction. See
+  [Free-peak fit](free-peaks.md).
+- **Results:** the plots of the phase: fit, pair contributions, Warren,
+  local trends, size distribution, and CS grid.
 
-## Biso modes
+## Fit plot
 
-The GUI supports:
+The fit plot shows the experimental and calculated $G(r)$ and the offset
+residual. It can also show:
 
-- one Biso per element;
-- site-labelled Biso parameters.
-
-Element-level Biso is recommended for large structures.
-
-## PDF window
-
-The PDF window can display:
-
-- experimental $G(r)$;
-- calculated $G(r)$;
-- offset residual;
-- $R_\mathrm{wp}$;
-- pair contributions;
-- pair-contribution sums;
-- shell tick markers;
+- pair contributions and their sums;
+- shell tick markers, filtered by pair, direction, and $r$ range;
 - the shape or SAXS term.
 
-Tick markers can be filtered by:
+When a neighbour is selected in the structure editor, the matching pair is
+marked on the fit plot with tick markers.
 
-- pair type;
-- crystallographic direction;
-- minimum and maximum $r$;
-- colour, width, and transparency.
+The plot can be popped out into its own window. When it is popped out, its
+usual place shows **Bring the plot back here** and **Show the plot
+window** buttons.
 
-## Result tabs
+## Saved fits
 
-- **Rwp** — best $R_\mathrm{wp}$ versus function evaluations.
-- **CS grid** — finite-shape candidate comparison.
-- **Warren** — direction-resolved strain.
-- **Size dist.** — size distribution.
-- **Params** — evolution of refinable parameters.
-- **Local trends** — lambda and delta trends.
-- **Structure** — VTK structure viewer.
+When a project is saved, the last calculated curves and the last esd
+results are stored in the project file. They are shown again when the
+project is opened, so a refinement does not need to be repeated just to
+see it. Press **Calculate** to update them.
 
 ## Performance recommendations
 
 For large calculations:
 
-- disable live PDF updates;
-- disable full-grid live $R_\mathrm{wp}$;
-- calculate pair contributions only when needed;
-- calculate Warren plots only when needed;
-- calculate local trends only when needed;
-- leave tick markers disabled until required.
+- calculate pair contributions, Warren plots, and local trends only when
+  needed;
+- leave tick markers off until required;
+- use a coarse refinement $r$ step and a fine final calculation;
+- consider the CUDA backends for large structures and stacking models.
+
+## Classic window
+
+The classic window keeps the original layout: a **Builder** and a raw-input
+editor on the left, and plots on the right. It reads and writes single-phase
+`.inp` files. Its actions are **Calculate**, **Run**,
+**Run finite-shape fit**, **Run CS grid search**, **Pause**, and
+**Stop/Save**.
+
+Projects opened from `.inp` files in the project window are converted to a
+one-dataset, one-phase project. Save them as `.json` to keep the
+multi-phase features.

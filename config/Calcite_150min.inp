@@ -37,8 +37,6 @@ qdamp = 0.00787114336321576
 delta_broad = 0.0014837841765491856
 qmax = 20.0
 qmax_zeros = 5.0
-d = 55.16048775535551
-d_std = 29.35343634721668
 a = 4.987970943498476
 b = 4.9889
 c = 17.066176682860487
@@ -78,8 +76,6 @@ qdamp = false
 delta_broad = false
 qmax = false
 qmax_zeros = false
-d = true
-d_std = true
 pah_a = true
 pah_b = false
 fe = false
@@ -102,7 +98,6 @@ lambda_c-c_0 = true
 lambda_ca-o_0 = true
 
 [bounds]
-d = 0.0, 150.0
 a = 0.0, 
 c = 0.0, 
 scale = 0.0, 
@@ -116,5 +111,5 @@ lambda_ca-o_0 = 0.0, 1.0
 [constraints]
 
 [crystallite_shape]
-mode = conventional
+mode = finite_shape
 

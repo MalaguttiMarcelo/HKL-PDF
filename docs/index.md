@@ -14,6 +14,16 @@ numerical kernels.
 
 ## Main features
 
+- Project window with several datasets and several phases per dataset
+- JSON project files that also store the last fit and esds
+- Interactive structure editor with symmetry-preserving site edits
+- Refinement of site coordinates and occupancies
+- Anisotropic displacement parameters ($\beta_{ij}$) with site-symmetry
+  constraints and thermal ellipsoids
+- Esds and correlation matrix of refined parameters (optional)
+- Free-peak fit and peak-width analysis per crystallographic direction
+- Deterministic and stochastic (Markov) layer stacking and stacking faults
+- Optional NVIDIA GPU acceleration (CuPy/CUDA)
 - PDF calculation from CIF and other pymatgen-supported structure files
 - Conventional periodic-crystal PDF fitting
 - Symmetry-constrained lattice parameters
@@ -48,8 +58,11 @@ numerical kernels.
 - [Installation](installation.md)
 - [Quick start](quick-start.md)
 - [Graphical interface](gui.md)
-- [Input-file format](input-format.md)
+- [Project files (JSON)](project-format.md)
+- [Input-file format (.inp)](input-format.md)
 - [Parameter reference](parameters.md)
+- [Structure editor](structure-editor.md)
+- [GPU acceleration and performance](gpu.md)
 - [Troubleshooting](troubleshooting.md)
 
 ## Theory and fitting
@@ -60,6 +73,10 @@ numerical kernels.
 - [Microstrain](microstrain.md)
 - [SAXS and missing-low-$Q$ model](saxs-model.md)
 - [Finite crystallite shapes](finite-shapes.md)
+- [Layer stacking and stacking faults](stacking-faults.md)
+- [Anisotropic displacement parameters](adp.md)
+- [Esds and correlation matrix](uncertainties.md)
+- [Free-peak fit and width analysis per direction](free-peaks.md)
 
 ## Model reference
 
@@ -81,7 +98,8 @@ A normal HKL-PDF analysis follows these steps:
 
 1. Prepare a crystallographic structure, normally as a CIF file.
 2. Prepare experimental $G(r)$ data as a two-column text file.
-3. Create or load an HKL-PDF input file.
+3. Create a project (or open an `.inp` file) and add the dataset and
+   phases.
 4. Select a fitting range.
 5. Calculate the initial PDF without refinement.
 6. Compare the calculated PDF with the experimental data.
@@ -126,6 +144,12 @@ HKL-PDF provides:
 - isotropic distance-dependent broadening;
 - Wilkens dislocation microstrain;
 - PAH directional microstrain.
+
+### Layer stacking
+
+Layered materials can be built from a layer and a deterministic or random
+(Markov) sequence of stacking vectors, inside a finite crystallite or as
+bulk.
 
 ### SAXS belly model
 

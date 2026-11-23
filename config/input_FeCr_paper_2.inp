@@ -26,6 +26,10 @@ compute_pair_contributions_on_finish = true
 compute_warren_on_finish = true
 compute_local_trends_on_finish = true
 export_finite_coordination = false
+shell_backend = cpu
+pdf_backend = cpu
+gpu_device = 0
+gpu_memory_fraction = 0.7
 
 [initial_values]
 scale = 0.27436764907058575
@@ -36,12 +40,10 @@ alpha = 90.0
 beta = 90.0
 gamma = 90.0
 qdamp = 0.011485099495637478
-delta_broad = 0.0014090180673610453
+delta_broad = 2.0
 qmax = 20.0
 qmax_zeros = 5.0
 biso_fe = 0.3051413519141072
-d = 98.7144702757019
-d_std = 45.70974245071322
 x_fe1 = 0.0
 y_fe1 = 0.0
 z_fe1 = 0.0
@@ -72,8 +74,6 @@ delta_broad = false
 qmax = false
 qmax_zeros = false
 biso_fe = true
-d = true
-d_std = true
 x_fe1 = false
 y_fe1 = false
 z_fe1 = false
@@ -103,5 +103,8 @@ lambda_fe0plus-fe0plus_3 = 0.000, 1.000
 re = d
 
 [crystallite_shape]
-mode = conventional
+mode = finite_shape
+
+[layer_stacking]
+sequence_json = []
 

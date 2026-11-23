@@ -1,25 +1,35 @@
 # FeCr ball-milled example
 
-This example demonstrates PDF fitting of a ball-milled FeCr sample using a
-body-centred cubic Fe structural model.
+PDF fitting of a ball-milled Fe–Cr sample with a body-centred cubic Fe
+structural model, spherical crystallite size, local correlations, and Wilkens
+dislocation microstrain.
 
 ## Files
 
-- `data/Fe_bcc_300K.cif`: BCC Fe structure.
-- `data/FeCr_ID31.xy`: experimental PDF data.
-- `FeCr-conventional.inp`: conventional PDF fitting.
+| File | Contents |
+|---|---|
+| `Fe_bcc_300K.cif` | BCC Fe structure |
+| `FeCr_ID31.xy` | Experimental $G(r)$ |
+| `input_fecr_paper_2.hklpdf.json` | Project for the project window (includes the saved fit) |
+| `input_FeCr_paper_2.inp` | Same model as an `.inp` file: conventional fit, 2–150 Å |
+| `input_FeCr_paper_3.inp` | Variant with an explicit finite disk-shaped crystallite |
 
-## Conventional fit
+All paths are relative, so the example runs from any location.
 
-The conventional fit uses:
+## Running
 
-```ini
-[refinement]
-saxs_enabled = false
+```bash
+python -m pdf_fitting.gui examples/1-FeCr-ball-milled/input_fecr_paper_2.hklpdf.json
+```
 
-In the public input, replace the absolute paths with relative paths:
+The saved fit is shown when the project opens. Press **Calculate** (F5) to
+recalculate it, or **Refine** (F6) to refine.
 
-```ini
-[files]
-structure_file = data/Fe_bcc_300K.cif
-gr_data_file = data/FeCr_ID31.xy
+## What to try
+
+- **Peak widths (free fit)** on the phase: free-peak fit and the width
+  analysis per direction.
+- **Refinement settings › esds and correlation matrix**, then
+  **Refined parameters › Compute esds now**.
+- **Structure (3D)**: select an Fe atom, then a neighbour, and use
+  **Mark selected on PDF fit**.

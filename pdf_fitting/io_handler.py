@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 
 import configparser
 import re
@@ -125,6 +126,67 @@ def _to_float(x, default=None):
     except Exception:
         return default
 
+def _parse_typed_section(
+    config_raw,
+    section_name: str,
+) -> Dict[str, Any]:
+    """
+    Parse an INI section into bool, int, float, or string values.
+    """
+    output: Dict[str, Any] = {}
+
+    if section_name not in config_raw:
+        return output
+
+    for key, value in config_raw[section_name].items():
+        key = str(key).strip()
+
+        raw = (
+            ""
+            if value is None
+            else str(value).strip()
+        )
+
+        if not key or raw == "":
+            continue
+
+        lower = raw.lower()
+
+        if lower in {
+            "true",
+            "false",
+            "yes",
+            "no",
+            "y",
+            "n",
+            "on",
+            "off",
+            "1",
+            "0",
+        }:
+            output[key] = lower in {
+                "true",
+                "yes",
+                "y",
+                "on",
+                "1",
+            }
+            continue
+
+        if re.fullmatch(r"[+-]?\d+", raw):
+            try:
+                output[key] = int(raw)
+                continue
+            except Exception:
+                pass
+
+        try:
+            output[key] = float(raw)
+        except Exception:
+            output[key] = raw
+
+    return output
+
 
 # -----------------------------------------------------------------------------
 # Write-back helpers
@@ -229,6 +291,25 @@ def write_fit_log(output_dir: str, params: dict, chi2: float, rwp: float, input_
 # -----------------------------------------------------------------------------
 # Main reader
 # -----------------------------------------------------------------------------
+_RAW_STRING_REFINEMENT_KEYS = {
+    "refine_occ_species",
+    "refine_xyz_species",
+}
+
+
+def _resolve_beside(path: str, input_file: str) -> str:
+    """
+    A relative path in [files] is taken relative to the input file's folder
+    when the file exists there (so example folders can be moved or cloned);
+    otherwise it is kept as written (relative to the working directory).
+    """
+    path = str(path).strip()
+    if not path or os.path.isabs(path):
+        return path
+    candidate = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(input_file)), path))
+    return candidate if os.path.exists(candidate) else path
+
+
 def read_input_file(filename: str) -> Dict[str, Any]:
     # IMPORTANT: use RawConfigParser (no %-interpolation).
     # This allows constraint expressions like "a%b" or strings containing '%'
@@ -247,8 +328,8 @@ def read_input_file(filename: str) -> Dict[str, Any]:
     if "structure_file" not in config_raw["files"] or "gr_data_file" not in config_raw["files"]:
         raise KeyError("Missing required keys in [files]: structure_file, gr_data_file")
 
-    structure_file = config_raw["files"]["structure_file"]
-    gr_data_file = config_raw["files"]["gr_data_file"]
+    structure_file = _resolve_beside(config_raw["files"]["structure_file"], filename)
+    gr_data_file = _resolve_beside(config_raw["files"]["gr_data_file"], filename)
 
     # --- Range ---
     if "range" not in config_raw:
@@ -428,6 +509,12 @@ def read_input_file(filename: str) -> Dict[str, Any]:
             if raw == "":
                 continue
 
+            # Element lists stay raw strings: "N" or "Y" must not be read
+            # as booleans.
+            if key in _RAW_STRING_REFINEMENT_KEYS:
+                refinement_cfg[key] = raw
+                continue
+
             low = raw.lower()
             if low in ("true", "false", "yes", "no", "y", "n", "on", "off", "1", "0"):
                 refinement_cfg[key] = low in ("true", "yes", "y", "on", "1")
@@ -479,6 +566,282 @@ def read_input_file(filename: str) -> Dict[str, Any]:
             except Exception:
                 crystallite_shape[key] = raw
 
+    # ---------------------------------------------------------
+    # New periodic layer-stacking model.
+    #
+    # The sequence is saved as JSON because standard INI syntax has no
+    # native representation for a list of layer dictionaries.
+    # ---------------------------------------------------------
+    layer_stacking: Dict[str, Any] = {}
+
+    if "layer_stacking" in config_raw:
+        for k, v in config_raw[
+            "layer_stacking"
+        ].items():
+            key = str(
+                k
+            ).strip()
+
+            raw = (
+                ""
+                if v is None
+                else str(
+                    v
+                ).strip()
+            )
+
+            if not key:
+                continue
+
+            # sequence_json is special: it is a JSON list of dictionaries.
+            if key.lower() == "sequence_json":
+                if not raw:
+                    layer_stacking[
+                        "sequence"
+                    ] = []
+                    continue
+
+                try:
+                    sequence = json.loads(
+                        raw
+                    )
+
+                    if not isinstance(
+                        sequence,
+                        list,
+                    ):
+                        raise ValueError(
+                            "sequence_json must decode to a list."
+                        )
+
+                    layer_stacking[
+                        "sequence"
+                    ] = sequence
+
+                except Exception as exc:
+                    raise ValueError(
+                        "Invalid sequence_json in [layer_stacking]. "
+                        "The sequence must be valid JSON and use double "
+                        "quotes around strings and dictionary keys."
+                    ) from exc
+
+                continue
+
+            if raw == "":
+                continue
+
+            lower = raw.lower()
+
+            if lower in (
+                "true",
+                "false",
+                "yes",
+                "no",
+                "y",
+                "n",
+                "on",
+                "off",
+                "1",
+                "0",
+            ):
+                layer_stacking[
+                    key
+                ] = lower in (
+                    "true",
+                    "yes",
+                    "y",
+                    "on",
+                    "1",
+                )
+                continue
+
+            if re.fullmatch(
+                r"[+-]?\d+",
+                raw,
+            ):
+                try:
+                    layer_stacking[
+                        key
+                    ] = int(
+                        raw
+                    )
+                    continue
+
+                except Exception:
+                    pass
+
+            try:
+                layer_stacking[
+                    key
+                ] = float(
+                    raw
+                )
+                continue
+
+            except Exception:
+                layer_stacking[
+                    key
+                ] = raw
+
+    # ---------------------------------------------------------
+    # Stacking spacing/lateral-vector search
+    # ---------------------------------------------------------
+    stacking_search = _parse_typed_section(
+        config_raw,
+        "stacking_search",
+    )
+
+    stacking_vector_search = _parse_typed_section(
+        config_raw,
+        "stacking_vector_search",
+    )
+
+
+    # ---------------------------------------------------------
+    # Legacy transition-A / transition-B stacking section.
+    #
+    # Retained only so older input files can still be opened.
+    # New code must use layer_stacking.
+    # ---------------------------------------------------------
+    stacking_faults: Dict[str, Any] = {}
+
+    if "stacking_faults" in config_raw:
+        for k, v in config_raw[
+            "stacking_faults"
+        ].items():
+            key = str(
+                k
+            ).strip()
+
+            raw = (
+                ""
+                if v is None
+                else str(
+                    v
+                ).strip()
+            )
+
+            if not key or not raw:
+                continue
+
+            lower = raw.lower()
+
+            if lower in (
+                "true",
+                "false",
+                "yes",
+                "no",
+                "y",
+                "n",
+                "on",
+                "off",
+                "1",
+                "0",
+            ):
+                stacking_faults[
+                    key
+                ] = lower in (
+                    "true",
+                    "yes",
+                    "y",
+                    "on",
+                    "1",
+                )
+                continue
+
+            if re.fullmatch(
+                r"[+-]?\d+",
+                raw,
+            ):
+                try:
+                    stacking_faults[
+                        key
+                    ] = int(
+                        raw
+                    )
+                    continue
+
+                except Exception:
+                    pass
+
+            try:
+                stacking_faults[
+                    key
+                ] = float(
+                    raw
+                )
+                continue
+
+            except Exception:
+                stacking_faults[
+                    key
+                ] = raw    
+
+
+    stacking_refinement: Dict[str, Any] = {}
+
+    if "stacking_refinement" in config_raw:
+        raw_treatment = config_raw.get(
+            "stacking_refinement",
+            "treatment",
+            fallback="fixed",
+        )
+
+        stacking_refinement[
+            "treatment"
+        ] = str(
+            raw_treatment
+            or "fixed"
+        ).strip().lower()
+
+        transitions_json = config_raw.get(
+            "stacking_refinement",
+            "transitions_json",
+            fallback="[]",
+        )
+
+        try:
+            transitions = json.loads(
+                transitions_json
+            )
+
+            if not isinstance(
+                transitions,
+                list,
+            ):
+                transitions = []
+
+        except Exception:
+            transitions = []
+
+        stacking_refinement[
+            "transitions"
+        ] = transitions
+
+        stochastic_vectors_json = config_raw.get(
+            "stacking_refinement",
+            "stochastic_vectors_json",
+            fallback="{}",
+        )
+
+        try:
+            stochastic_vectors = json.loads(
+                stochastic_vectors_json
+            )
+
+            if not isinstance(
+                stochastic_vectors,
+                dict,
+            ):
+                stochastic_vectors = {}
+
+        except Exception:
+            stochastic_vectors = {}
+
+        stacking_refinement[
+            "stochastic_vectors"
+        ] = stochastic_vectors
+        
 
     return {
         "structure_file": structure_file,
@@ -494,4 +857,9 @@ def read_input_file(filename: str) -> Dict[str, Any]:
         "constraints": constraints,
         "biso_by_species": biso_by_species,
         "crystallite_shape": crystallite_shape,
+        "layer_stacking": layer_stacking,
+        "stacking_search": stacking_search,
+        "stacking_vector_search": stacking_vector_search,
+        "stacking_refinement": stacking_refinement,
+        "stacking_faults": stacking_faults,
     }

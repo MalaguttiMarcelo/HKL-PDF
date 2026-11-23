@@ -1,16 +1,35 @@
 {
-	"folders": [
-		{
-			"path": "."
-		}
-	],
-	"settings": {
-		"python-envs.pythonProjects": [
-			{
-				"path": "hello.py",
-				"envManager": "ms-python.python:venv",
-				"packageManager": "ms-python.python:pip"
-			}
-		]
-	}
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "python-envs.pythonProjects": [
+            {
+                "path": "hello.py",
+                "envManager": "ms-python.python:venv",
+                "packageManager": "ms-python.python:pip"
+            }
+        ],
+
+        "python.defaultInterpreterPath": "${workspaceFolder}\\pdf_fitting_env\\Scripts\\python.exe",
+        "python.terminal.activateEnvironment": false,
+        "terminal.integrated.cwd": "${workspaceFolder}",
+
+        "terminal.integrated.profiles.windows": {
+            "PowerShell (pdf_fitting_env)": {
+                "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "args": [
+                    "-NoExit",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "& '${workspaceFolder}\\pdf_fitting_env\\Scripts\\Activate.ps1'"
+                ]
+            }
+        },
+
+        "terminal.integrated.defaultProfile.windows": "PowerShell (pdf_fitting_env)"
+    }
 }

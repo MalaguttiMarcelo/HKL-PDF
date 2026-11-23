@@ -561,10 +561,14 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
 
     def _ensure_preview_cloud(self, max_cells: int) -> None:
         """
-        Build a reusable atom cloud large enough for the requested shape.
+        Build a reusable preview atom cloud.
 
-        The shape mask is applied later. This avoids rebuilding the full supercell
-        whenever only graphical settings change.
+        Important:
+        This is only for graphics. For large COF structures, creating every
+        atom in every translated cell can easily create millions of points.
+
+        Therefore the preview cloud is capped. The finite-shape PDF calculation
+        still uses the complete atomistic model; only the 3D preview is sampled.
         """
         max_cells = int(max(1, max_cells))
 
@@ -578,43 +582,153 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
         M = self._lattice_matrix()
         translations = generate_translation_grid(max_cells)
 
+        # Maximum number of atoms retained in the preview cloud.
+        # Increase only if your GPU is very strong.
+        preview_cloud_limit = 150000
+
         if self._structure is None:
+            if translations.shape[0] > preview_cloud_limit:
+                indices = np.linspace(
+                    0,
+                    translations.shape[0] - 1,
+                    preview_cloud_limit,
+                    dtype=np.int64,
+                )
+                translations = translations[indices]
+
             frac_all = translations.astype(np.float32)
             cart_all = (frac_all @ M).astype(np.float32)
 
-            elements = np.array(["X"] * frac_all.shape[0], dtype=object)
-            labels = np.array([str(i) for i in range(frac_all.shape[0])], dtype=object)
+            elements = np.array(
+                ["X"] * frac_all.shape[0],
+                dtype=object,
+            )
+
+            labels = np.array(
+                [str(i) for i in range(frac_all.shape[0])],
+                dtype=object,
+            )
 
         else:
             sites = list(self._structure.sites)
 
             site_frac = np.asarray(
-                [np.asarray(site.frac_coords, dtype=float) for site in sites],
+                [
+                    np.asarray(site.frac_coords, dtype=float)
+                    for site in sites
+                ],
                 dtype=np.float32,
             )
 
             site_elements = np.asarray(
-                [_clean_element_symbol(str(site.specie)) for site in sites],
+                [
+                    _clean_element_symbol(
+                        str(next(iter(site.species))).strip()
+                    )
+                    for site in sites
+                ],
                 dtype=object,
             )
 
-            n_trans = translations.shape[0]
-            n_sites = site_frac.shape[0]
+
+            n_sites = int(site_frac.shape[0])
+            n_translations = int(translations.shape[0])
+
+            # ---------------------------------------------------------
+            # Preview-only sampling.
+            #
+            # Keep all translation positions when possible, but use only
+            # a representative selection of atomic sites per unit cell.
+            # ---------------------------------------------------------
+            max_sites_per_cell = max(
+                1,
+                preview_cloud_limit // max(n_translations, 1),
+            )
+
+            if n_sites > max_sites_per_cell:
+                site_indices = np.linspace(
+                    0,
+                    n_sites - 1,
+                    max_sites_per_cell,
+                    dtype=np.int64,
+                )
+            else:
+                site_indices = np.arange(
+                    n_sites,
+                    dtype=np.int64,
+                )
+
+            # If translations alone are too numerous, sample them too.
+            max_translations = max(
+                1,
+                preview_cloud_limit // max(site_indices.size, 1),
+            )
+
+            if n_translations > max_translations:
+                translation_indices = np.linspace(
+                    0,
+                    n_translations - 1,
+                    max_translations,
+                    dtype=np.int64,
+                )
+
+                translations = translations[
+                    translation_indices
+                ]
+
+            selected_site_frac = site_frac[
+                site_indices
+            ]
+
+            selected_site_elements = site_elements[
+                site_indices
+            ]
+
+            n_translations = int(
+                translations.shape[0]
+            )
+
+            n_selected_sites = int(
+                selected_site_frac.shape[0]
+            )
 
             frac_all = (
                 translations[:, None, :].astype(np.float32)
-                + site_frac[None, :, :]
+                + selected_site_frac[None, :, :]
             ).reshape(-1, 3)
 
-            site_index_all = np.tile(np.arange(n_sites, dtype=np.int32), n_trans)
+            site_index_all = np.tile(
+                site_indices,
+                n_translations,
+            )
 
-            cart_all = (frac_all @ M).astype(np.float32)
+            cart_all = (
+                frac_all @ M
+            ).astype(
+                np.float32
+            )
 
-            elements = site_elements[site_index_all]
+            elements = site_elements[
+                site_index_all
+            ]
 
-            labels = np.asarray(
-                [f"{int(i)}:{site_elements[int(i)]}" for i in site_index_all],
+            site_labels = np.asarray(
+                [
+                    f"{index}:{site_elements[index]}"
+                    for index in range(n_sites)
+                ],
                 dtype=object,
+            )
+
+            labels = site_labels[
+                site_index_all
+            ]
+
+            print(
+                "[SHAPE PREVIEW] "
+                f"translations={n_translations:,}, "
+                f"sites/cell={n_selected_sites:,}, "
+                f"preview atoms={frac_all.shape[0]:,}"
             )
 
         self._cloud_cache_max_cells = max_cells
@@ -623,7 +737,6 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
         self._cloud_elements = elements
         self._cloud_labels = labels
 
-
     def _build_preview_atoms(self, spec: CrystalliteShapeSpec) -> Dict[str, Any]:
         """
         Apply the current shape mask to the cached atom cloud.
@@ -631,7 +744,32 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
         M = self._lattice_matrix()
 
         max_cells = int(
-            np.ceil(max(float(spec.diameter_cells), float(spec.height_cells), 1.0))
+            np.ceil(
+                max(
+                    float(
+                        getattr(
+                            spec,
+                            "axis1_cells",
+                            spec.diameter_cells,
+                        )
+                    ),
+                    float(
+                        getattr(
+                            spec,
+                            "axis2_cells",
+                            spec.diameter_cells,
+                        )
+                    ),
+                    float(
+                        getattr(
+                            spec,
+                            "axis3_cells",
+                            spec.height_cells,
+                        )
+                    ),
+                    1.0,
+                )
+            )
         ) + 2
 
         self._ensure_preview_cloud(max_cells)
@@ -749,29 +887,80 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
             self._last_visible_cart = cart.copy()
             self._last_visible_elements = list(elements)
 
-            # Atom colors
-            rgb = np.asarray(
-                [_rgb_for_element(el) for el in elements],
-                dtype=np.uint8,
-            ) if n_atoms > 0 else None
+            # ---------------------------------------------------------
+            # Fast preview rendering for large crystallites.
+            #
+            # Do not create a full VTK sphere mesh for every atom in a
+            # large COF supercell. Structure Studio uses the same idea:
+            #
+            #   <= 25,000 atoms: real sphere glyphs
+            #   >  25,000 atoms: GPU point spheres
+            #
+            # For very large previews, display a representative subset only.
+            # This affects ONLY the preview graphics. The actual finite-shape
+            # calculation still uses all atoms/pairs.
+            # ---------------------------------------------------------
+            preview_limit = 30000
 
-            # Use the same spherical GPU rendering as StructureViewer.
-            render_as_spheres = True
-            
-            if n_atoms < 20000:
-                point_size = 12.0
-            elif n_atoms < 100000:
-                point_size = 7.0
+            display_coords = coords
+            display_elements = elements
+            display_labels = labels
+
+            if n_atoms > preview_limit:
+                preview_indices = np.linspace(
+                    0,
+                    n_atoms - 1,
+                    preview_limit,
+                    dtype=np.int64,
+                )
+
+                display_coords = coords[preview_indices]
+                display_elements = [
+                    elements[index]
+                    for index in preview_indices
+                ]
+
+                display_labels = [
+                    labels[index]
+                    for index in preview_indices
+                ]
+
+            n_display_atoms = int(
+                display_coords.shape[0]
+            )
+
+            # Atom colors only for the atoms actually drawn.
+            rgb = np.asarray(
+                [
+                    _rgb_for_element(element)
+                    for element in display_elements
+                ],
+                dtype=np.uint8,
+            ) if n_display_atoms > 0 else None
+
+            # Match the Structure Studio performance behavior.
+            use_sphere_glyphs = n_display_atoms <= 25000
+
+            if n_display_atoms < 10000:
+                point_size = 10.0
+            elif n_display_atoms < 30000:
+                point_size = 5.0
             else:
-                point_size = 4.0
+                point_size = 3.0
 
             self.viewer.set_atoms(
-                coords,
+                display_coords,
                 rgb,
                 visible=bool(self.chk_show_atoms.isChecked()),
                 point_size=point_size,
-                render_as_spheres=render_as_spheres,
-                reset_camera=not getattr(self.viewer, "_camera_initialized", False),
+                render_as_spheres=use_sphere_glyphs,
+                reset_camera=not getattr(
+                    self.viewer,
+                    "_camera_initialized",
+                    False,
+                ),
+                use_sphere_glyphs=use_sphere_glyphs,
+                show_silhouette=use_sphere_glyphs,
             )
 
             # Element legend in top-right corner
@@ -935,15 +1124,16 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
             else:
                 self.viewer.hide("shape_outline")
 
-            # Labels
             show_labels = (
                 bool(self.chk_show_labels.isChecked())
-                and n_atoms <= int(self.spin_max_labels.value())
+                and n_display_atoms <= int(
+                    self.spin_max_labels.value()
+                )
             )
 
             self.viewer.set_labels(
-                coords,
-                labels,
+                display_coords,
+                display_labels,
                 visible=show_labels,
                 font_size=10,
             )
@@ -951,10 +1141,11 @@ class CrystalliteShapeDialog(QtWidgets.QDialog):
             coord_label = "real space / Å" if use_real else "fractional-cell coordinates"
 
             self.lbl_info.setText(
-                f"Visible atoms/points: {n_atoms}\n"
+                f"Atoms inside shape: {n_atoms}\n"
+                f"Atoms drawn in preview: {n_display_atoms}\n"
                 f"Coordinates: {coord_label}\n"
                 f"Shape origin: unit-cell origin, Cartesian [0, 0, 0]\n"
-                f"Rendering: {'spheres' if render_as_spheres else 'GPU points'}\n"
+                f"Rendering: {'sphere glyphs' if use_sphere_glyphs else 'GPU point spheres'}\n"
                 f"Axis = [{spec.axis_h} {spec.axis_k} {spec.axis_l}]\n"
                 f"Base1 = [{spec.base1_h} {spec.base1_k} {spec.base1_l}], "
                 f"Base2 = [{spec.base2_h} {spec.base2_k} {spec.base2_l}]"

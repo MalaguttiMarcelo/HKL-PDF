@@ -1,6 +1,6 @@
 [files]
-structure_file = Z:/Softwares/pdf_fitting_project/config/Pd.cif
-gr_data_file = Z:/Softwares/pdf_fitting_project/data/cylinder_d250_h101.15_Biso0p3_SAXS.xy
+structure_file = Pd.cif
+gr_data_file = cylinder_d250_h101.15_Biso0p3_SAXS.xy
 
 [range]
 r_min = 2.0
@@ -26,6 +26,10 @@ saxs_enabled = false
 saxs_model = same_as_size_model
 saxs_apply_qdamp = false
 saxs_apply_qmax = false
+shell_backend = cpu
+pdf_backend = cpu
+gpu_device = 0
+gpu_memory_fraction = 0.7
 
 [initial_values]
 scale = 0.05001362553532311
@@ -80,20 +84,18 @@ qdamp = false
 delta_broad = false
 qmax = false
 qmax_zeros = false
-delta1_c-ca = false
-delta1_c-o = false
-occ_c = False
-occ_ca = False
-occ_o = False
-x_c = False
-x_ca = False
-x_o = False
-y_c = False
-y_ca = False
-y_o = False
-z_c = False
-z_ca = False
-z_o = False
+occ_c = false
+occ_ca = false
+occ_o = false
+x_c = false
+x_ca = false
+x_o = false
+y_c = false
+y_ca = false
+y_o = false
+z_c = false
+z_ca = false
+z_o = false
 cyl_diameter = true
 cyl_thickness = true
 cyl_thickness_std = false

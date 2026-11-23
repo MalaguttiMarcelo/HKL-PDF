@@ -16,8 +16,55 @@ class CrystalliteShapeSpec:
     # "grid_search" = scan diameter/height ranges
     search_mode: str = "grid_search"
 
+    # Backward-compatible generic dimensions.
+    #
+    # diameter_cells and height_cells are retained because old input files
+    # and cylinder/disk calculations use them.
     diameter_cells: float = 10.0
     height_cells: float = 5.0
+
+    # Shape-axis dimensions in unit-cell lengths.
+    #
+    # Meaning depends on shape_type:
+    #
+    # sphere:
+    #     axis1_cells = sphere diameter
+    #
+    # cylinder / disk:
+    #     axis1_cells = diameter
+    #     axis2_cells = same as axis1_cells
+    #     axis3_cells = height / thickness
+    #
+    # ellipsoid:
+    #     axis1_cells = diameter along base direction 1
+    #     axis2_cells = diameter along base direction 2
+    #     axis3_cells = diameter along shape axis
+    #
+    # prism:
+    #     axis1_cells = length along base direction 1
+    #     axis2_cells = length along base direction 2
+    #     axis3_cells = length along shape axis
+    axis1_cells: float = 10.0
+    axis2_cells: float = 10.0
+    axis3_cells: float = 5.0
+
+    # Axis-specific grid-search settings used by the new finite
+    # crystallite Builder.
+    scan_axis1: bool = True
+    axis1_min_cells: float = 5.0
+    axis1_max_cells: float = 20.0
+    axis1_step_cells: float = 1.0
+
+    scan_axis2: bool = False
+    axis2_min_cells: float = 5.0
+    axis2_max_cells: float = 20.0
+    axis2_step_cells: float = 1.0
+
+    scan_axis3: bool = True
+    axis3_min_cells: float = 1.0
+    axis3_max_cells: float = 15.0
+    axis3_step_cells: float = 1.0
+
 
     diameter_min_cells: float = 5.0
     diameter_max_cells: float = 20.0
@@ -45,7 +92,24 @@ class CrystalliteShapeSpec:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "CrystalliteShapeSpec":
+    def from_dict(
+        cls,
+        d: Dict[str, Any],
+    ) -> "CrystalliteShapeSpec":
+        """
+        Read a shape specification.
+
+        Old input files containing only:
+
+            diameter_cells
+            height_cells
+
+        remain valid. Their values are copied into:
+
+            axis1_cells
+            axis2_cells
+            axis3_cells
+        """
         out = cls()
 
         def _to_bool(x) -> bool:
@@ -65,26 +129,143 @@ class CrystalliteShapeSpec:
 
             return bool(x)
 
-        for k, v in (d or {}).items():
-            if not hasattr(out, k):
+        values = dict(d or {})
+
+        for key, value in values.items():
+            if not hasattr(out, key):
                 continue
 
-            old = getattr(out, k)
+            old = getattr(out, key)
 
             try:
                 if isinstance(old, bool):
-                    setattr(out, k, _to_bool(v))
+                    setattr(
+                        out,
+                        key,
+                        _to_bool(value),
+                    )
+
                 elif isinstance(old, int):
-                    setattr(out, k, int(float(v)))
+                    setattr(
+                        out,
+                        key,
+                        int(float(value)),
+                    )
+
                 elif isinstance(old, float):
-                    setattr(out, k, float(v))
+                    setattr(
+                        out,
+                        key,
+                        float(value),
+                    )
+
                 else:
-                    setattr(out, k, str(v))
+                    setattr(
+                        out,
+                        key,
+                        str(value),
+                    )
+
             except Exception:
-                setattr(out, k, v)
+                setattr(
+                    out,
+                    key,
+                    value,
+                )
+
+        # ---------------------------------------------------------
+        # Backward compatibility:
+        #
+        # If an old input has no axis1/axis2/axis3 dimensions, derive
+        # them from the old diameter_cells / height_cells fields.
+        # ---------------------------------------------------------
+        if "axis1_cells" not in values:
+            out.axis1_cells = float(
+                out.diameter_cells
+            )
+
+        if "axis2_cells" not in values:
+            out.axis2_cells = float(
+                out.diameter_cells
+            )
+
+        if "axis3_cells" not in values:
+            out.axis3_cells = float(
+                out.height_cells
+            )
+
+        # ---------------------------------------------------------
+        # Convert legacy diameter/height scan settings into the
+        # axis-specific scan representation when the new keys are absent.
+        # ---------------------------------------------------------
+        if "scan_axis1" not in values:
+            out.scan_axis1 = bool(
+                out.scan_diameter
+            )
+
+        if "axis1_min_cells" not in values:
+            out.axis1_min_cells = float(
+                out.diameter_min_cells
+            )
+
+        if "axis1_max_cells" not in values:
+            out.axis1_max_cells = float(
+                out.diameter_max_cells
+            )
+
+        if "axis1_step_cells" not in values:
+            out.axis1_step_cells = float(
+                out.step_cells
+            )
+
+        if "scan_axis2" not in values:
+            out.scan_axis2 = False
+
+        if "axis2_min_cells" not in values:
+            out.axis2_min_cells = float(
+                out.axis1_min_cells
+            )
+
+        if "axis2_max_cells" not in values:
+            out.axis2_max_cells = float(
+                out.axis1_max_cells
+            )
+
+        if "axis2_step_cells" not in values:
+            out.axis2_step_cells = float(
+                out.axis1_step_cells
+            )
+
+        if "scan_axis3" not in values:
+            out.scan_axis3 = bool(
+                out.scan_height
+            )
+
+        if "axis3_min_cells" not in values:
+            out.axis3_min_cells = float(
+                out.height_min_cells
+            )
+
+        if "axis3_max_cells" not in values:
+            out.axis3_max_cells = float(
+                out.height_max_cells
+            )
+
+        if "axis3_step_cells" not in values:
+            out.axis3_step_cells = float(
+                out.step_cells
+            )
+
+        # Keep old aliases synchronized with the new values.
+        out.diameter_cells = float(
+            out.axis1_cells
+        )
+
+        out.height_cells = float(
+            out.axis3_cells
+        )
 
         return out
-
 
 def lattice_matrix_from_params(
     a: float,
@@ -331,11 +512,54 @@ def shape_mask(
         base2_hkl=(spec.base2_h, spec.base2_k, spec.base2_l),
     )
 
-    D1_ang = float(spec.diameter_cells) * float(base1_len)
-    D2_ang = float(spec.diameter_cells) * float(base2_len)
-    H_ang = float(spec.height_cells) * float(axis_len)
+    shape_type = str(
+        spec.shape_type
+    ).strip().lower()
 
-    shape_type = str(spec.shape_type).strip().lower()
+    axis1_cells = float(
+        getattr(
+            spec,
+            "axis1_cells",
+            spec.diameter_cells,
+        )
+    )
+
+    axis2_cells = float(
+        getattr(
+            spec,
+            "axis2_cells",
+            spec.diameter_cells,
+        )
+    )
+
+    axis3_cells = float(
+        getattr(
+            spec,
+            "axis3_cells",
+            spec.height_cells,
+        )
+    )
+
+    # Sphere: only one physical dimension.
+    if shape_type in (
+        "sphere",
+        "spherical",
+    ):
+        axis2_cells = axis1_cells
+        axis3_cells = axis1_cells
+
+    # Cylinder/disk: one circular diameter in the e1/e2 plane.
+    elif shape_type in (
+        "cylinder",
+        "disk",
+        "disk-like",
+        "disk_like",
+    ):
+        axis2_cells = axis1_cells
+
+    D1_ang = axis1_cells * float(base1_len)
+    D2_ang = axis2_cells * float(base2_len)
+    H_ang = axis3_cells * float(axis_len)
 
     if shape_type in ("sphere", "spherical"):
         R = 0.25 * (D1_ang + D2_ang)
@@ -447,49 +671,197 @@ def build_shape_points_fractional(
         "n_points": int(frac_in.shape[0]),
     }
 
-def iter_shape_scan(spec: CrystalliteShapeSpec) -> Iterable[CrystalliteShapeSpec]:
+
+def iter_shape_scan(
+    spec: CrystalliteShapeSpec,
+) -> Iterable[CrystalliteShapeSpec]:
     """
-    Generate shape specs.
+    Generate finite crystallite-shape candidates.
 
-    search_mode = "predefined":
-        generate exactly one shape:
-            diameter_cells, height_cells
+    Predefined mode returns one candidate.
 
-    search_mode = "grid_search":
-        generate scan grid from min/max/step.
+    Grid-search mode supports independent Axis 1, Axis 2, and Axis 3
+    ranges from the finite-crystallite Builder.
     """
-    search_mode = str(getattr(spec, "search_mode", "grid_search")).strip().lower()
+    search_mode = str(
+        getattr(
+            spec,
+            "search_mode",
+            "grid_search",
+        )
+        or "grid_search"
+    ).strip().lower()
 
-    if search_mode in ("predefined", "single", "fixed", "fixed_dimensions"):
-        s = CrystalliteShapeSpec.from_dict(spec.to_dict())
-        s.scan_diameter = False
-        s.scan_height = False
-        s.diameter_infinite = False
-        yield s
+    if search_mode in {
+        "predefined",
+        "single",
+        "fixed",
+        "fixed_dimensions",
+    }:
+        candidate = CrystalliteShapeSpec.from_dict(
+            spec.to_dict()
+        )
+
+        candidate.scan_axis1 = False
+        candidate.scan_axis2 = False
+        candidate.scan_axis3 = False
+
+        candidate.scan_diameter = False
+        candidate.scan_height = False
+        candidate.diameter_infinite = False
+
+        candidate.diameter_cells = float(
+            candidate.axis1_cells
+        )
+
+        candidate.height_cells = float(
+            candidate.axis3_cells
+        )
+
+        yield candidate
         return
 
-    step = max(float(spec.step_cells), 1e-12)
+    def scan_values(
+        current_value: float,
+        enabled: bool,
+        minimum: float,
+        maximum: float,
+        step: float,
+    ) -> np.ndarray:
+        if not enabled:
+            return np.asarray(
+                [float(current_value)],
+                dtype=float,
+            )
 
-    if bool(getattr(spec, "scan_diameter", True)):
-        dmin = float(spec.diameter_min_cells)
-        dmax = float(spec.diameter_max_cells)
-        d_vals = np.arange(dmin, dmax + 0.5 * step, step)
+        minimum = float(minimum)
+        maximum = float(maximum)
+
+        if maximum < minimum:
+            minimum, maximum = (
+                maximum,
+                minimum,
+            )
+
+        step = max(
+            float(step),
+            1.0e-12,
+        )
+
+        return np.arange(
+            minimum,
+            maximum + 0.5 * step,
+            step,
+            dtype=float,
+        )
+
+    shape_type = str(
+        spec.shape_type
+        or "cylinder"
+    ).strip().lower()
+
+    axis1_values = scan_values(
+        spec.axis1_cells,
+        bool(spec.scan_axis1),
+        spec.axis1_min_cells,
+        spec.axis1_max_cells,
+        spec.axis1_step_cells,
+    )
+
+    if shape_type in {
+        "sphere",
+        "spherical",
+        "cylinder",
+        "disk",
+        "disk-like",
+        "disk_like",
+    }:
+        axis2_values = np.asarray(
+            [float(spec.axis1_cells)],
+            dtype=float,
+        )
     else:
-        if bool(getattr(spec, "diameter_infinite", False)):
-            d_vals = np.asarray([np.inf], dtype=float)
-        else:
-            d_vals = np.asarray([float(spec.diameter_cells)], dtype=float)
+        axis2_values = scan_values(
+            spec.axis2_cells,
+            bool(spec.scan_axis2),
+            spec.axis2_min_cells,
+            spec.axis2_max_cells,
+            spec.axis2_step_cells,
+        )
 
-    if bool(getattr(spec, "scan_height", True)):
-        hmin = float(spec.height_min_cells)
-        hmax = float(spec.height_max_cells)
-        h_vals = np.arange(hmin, hmax + 0.5 * step, step)
-    else:
-        h_vals = np.asarray([float(spec.height_cells)], dtype=float)
+    axis3_values = scan_values(
+        spec.axis3_cells,
+        bool(spec.scan_axis3),
+        spec.axis3_min_cells,
+        spec.axis3_max_cells,
+        spec.axis3_step_cells,
+    )
 
-    for d in d_vals:
-        for h in h_vals:
-            s = CrystalliteShapeSpec.from_dict(spec.to_dict())
-            s.diameter_cells = float(d)
-            s.height_cells = float(h)
-            yield s
+    for axis1_value in axis1_values:
+        for axis2_value in axis2_values:
+            for axis3_value in axis3_values:
+                candidate = CrystalliteShapeSpec.from_dict(
+                    spec.to_dict()
+                )
+
+                candidate.axis1_cells = float(
+                    axis1_value
+                )
+
+                if shape_type in {
+                    "sphere",
+                    "spherical",
+                    "cylinder",
+                    "disk",
+                    "disk-like",
+                    "disk_like",
+                }:
+                    candidate.axis2_cells = float(
+                        axis1_value
+                    )
+                else:
+                    candidate.axis2_cells = float(
+                        axis2_value
+                    )
+
+                candidate.axis3_cells = float(
+                    axis3_value
+                )
+
+                candidate.diameter_cells = float(
+                    candidate.axis1_cells
+                )
+
+                candidate.height_cells = float(
+                    candidate.axis3_cells
+                )
+
+                yield candidate
+
+                
+def shape_spec_from_config(
+    config: Dict[str, Any] | None,
+) -> CrystalliteShapeSpec:
+    """
+    Build a shape specification from the application configuration.
+    """
+    config = dict(
+        config
+        or {}
+    )
+
+    values = config.get(
+        "crystallite_shape",
+        config,
+    )
+
+    if not isinstance(
+        values,
+        dict,
+    ):
+        values = {}
+
+    return CrystalliteShapeSpec.from_dict(
+        values
+    )
+

@@ -12,6 +12,15 @@ missing-low-$Q$/SAXS baseline modelling.
 
 ## Features
 
+- Project window with several datasets and several phases per dataset
+- JSON project files that also keep the last fit and esds
+- Interactive structure editor with symmetry-preserving site edits
+- Refinement of site coordinates and occupancies
+- Anisotropic displacement parameters ($\beta_{ij}$) with thermal ellipsoids
+- Esds and correlation matrix of refined parameters (optional)
+- Free-peak fit and peak-width analysis per crystallographic direction
+- Deterministic and stochastic (Markov) layer stacking and stacking faults
+- Optional NVIDIA GPU acceleration through CuPy
 - PDF calculation from CIF structures
 - Least-squares refinement with SciPy
 - Symmetry-constrained lattice refinement
@@ -41,7 +50,14 @@ Useful pages include:
 - [Installation](docs/installation.md)
 - [Quick start](docs/quick-start.md)
 - [Graphical interface](docs/gui.md)
-- [Input-file format](docs/input-format.md)
+- [Project files (JSON)](docs/project-format.md)
+- [Input-file format (.inp)](docs/input-format.md)
+- [Structure editor](docs/structure-editor.md)
+- [Anisotropic ADPs](docs/adp.md)
+- [Esds and correlation matrix](docs/uncertainties.md)
+- [Free-peak fit and widths per direction](docs/free-peaks.md)
+- [Layer stacking and stacking faults](docs/stacking-faults.md)
+- [GPU acceleration and performance](docs/gpu.md)
 - [Parameter reference](docs/parameters.md)
 - [Model equations](docs/equations.md)
 - [Troubleshooting](docs/troubleshooting.md)
@@ -200,26 +216,39 @@ If the optional visualization dependencies were not installed automatically:
 python -m pip install pyvista pyvistaqt vtk qtpy
 ```
 
+### Optional: NVIDIA GPU support
+
+```bash
+python -m pip install cupy-cuda12x
+```
+
+Choose the CuPy package that matches your CUDA version. Then select **CUDA**
+in **Refinement settings › Backends**. See
+[GPU acceleration](docs/gpu.md).
+
 ### Start the application
 
 ```bash
-python -m pdf_fitting.gui
+python -m pdf_fitting.gui                 # project window
+python -m pdf_fitting.gui project.json    # open a project or .inp file
+python -m pdf_fitting.gui --classic       # previous single-phase window
 ```
 
 ## Quick start
 
 1. Start HKL-PDF.
-2. Select a crystallographic structure file, normally a CIF.
-3. Select an experimental two-column $G(r)$ data file.
-4. Enter the fitting range.
-5. Select the parameters to refine.
-6. Give the refinable parameters physically meaningful bounds.
-7. Click **Calculate** to inspect the initial model.
-8. Click **Run** to start conventional refinement.
-9. For an explicit finite crystallite, use **Run finite-shape fit** or
-   **Run CS grid search**.
-10. Inspect $R_\mathrm{wp}$, the residual, and parameter evolution before
-    saving the refined values.
+2. Click **+ Dataset** and select an experimental two-column $G(r)$ file.
+3. Click **+ Phase (CIF)** and select the structure. Repeat for more phases.
+4. Set the fitting range in **Data & range** and `qmax` in **Instrument**.
+5. Tick **Refine** for the parameters to refine and give them physically
+   meaningful bounds.
+6. Press **Calculate** (F5) to inspect the starting model.
+7. Press **Refine** (F6).
+8. Inspect $R_\mathrm{wp}$, the residual, and the parameter evolution. Turn
+   on esds in **Refinement settings** to see the correlation matrix.
+9. Save the project (Ctrl+S) as a `.json` file next to the data.
+
+Older `.inp` files can be opened directly.
 
 ## Experimental data format
 
@@ -237,8 +266,10 @@ is the experimental reduced PDF $G(r)$.
 
 ## Examples
 
-Example input files and their associated structure and experimental data are
-provided in the [`examples`](examples) directory.
+Example projects (`*.hklpdf.json`), input files (`*.inp`), and their
+structure and experimental data are provided in the
+[`examples`](examples) directory. Paths are relative, so the examples run
+from any location.
 
 The examples demonstrate:
 
@@ -251,11 +282,6 @@ The examples demonstrate:
 
 Open the `README.md` file inside each example directory for model-specific
 instructions.
-
-> [!NOTE]
-> Example input files should use relative paths. If a file still contains an
-> absolute path from the development computer, update `[files]` before running
-> it.
 
 ## First-run performance
 
@@ -283,6 +309,8 @@ Important cache directories include:
 ```text
 shell_cache
 finite_shape_cache
+cache/stochastic_topology
+edited_structures
 ```
 
 These generated caches do not need to be committed to Git.

@@ -156,15 +156,59 @@ saxs_apply_qmax = true
 
 ## Atomic-site parameters
 
-The GUI can write:
+| Parameter | Unit | Description |
+|---|---:|---|
+| `x_<site>`, `y_<site>`, `z_<site>` | fractional | Site coordinates. Only symmetry-free coordinates are refined; tied ones follow. |
+| `occ_<site>` | – | Site occupancy. |
+| `biso_<site>` | Å² | Site-labelled Biso. |
 
-```text
-x_site
-y_site
-z_site
-occ_site
-biso_site
-```
+Refined coordinates and occupancies are applied to the pair shells at every
+evaluation. The **Atoms & occupancy** page limits them with
+`occ_min`, `occ_max`, and `xyz_max_shift` (largest coordinate shift from the
+CIF value, in Å).
 
-> Current limitation: refined `x_*`, `y_*`, `z_*`, and `occ_*` values are not
-> yet used to regenerate packed pair vectors during every model evaluation.
+> Current limitation: site-labelled Biso values are averaged by element
+> before shell broadening. Use [anisotropic ADPs](adp.md) for site-specific
+> displacements.
+
+## Anisotropic displacement parameters
+
+| Parameter | Unit | Description |
+|---|---:|---|
+| `beta11_<site>` … `beta23_<site>` | – | Components of the $\beta_{ij}$ tensor of an anisotropic site. |
+
+Components fixed or tied by the site symmetry are not refined
+independently. See [Anisotropic ADPs](adp.md).
+
+## Stacking parameters
+
+| Parameter | Unit | Description |
+|---|---:|---|
+| `stack_state_<s>_du` | fractional | Lateral shift along $a$ of stacking state `<s>` (`a`, `b`, or a state id). |
+| `stack_state_<s>_dv` | fractional | Lateral shift along $b$. |
+| `stack_state_<s>_h` | Å | Layer spacing of the state. |
+
+See [Layer stacking and stacking faults](stacking-faults.md).
+
+## Refinement settings
+
+These keys belong in `[refinement]` of an `.inp` file or in `refinement` of a
+project file.
+
+| Key | Default | Description |
+|---|---|---|
+| `staged_refinement` | false | Refine in stages before the final stage. |
+| `max_nfev_final`, `max_nfev_stage` | 60, 30 | Function-evaluation budgets. |
+| `ftol`, `xtol`, `gtol` | 0.001 | Stopping tolerances. |
+| `loss` | linear | `linear`, `soft_l1`, `huber`, `cauchy`, or `arctan`. |
+| `refinement_r_step`, `refinement_r_step_final` | 0 | Coarse $r$ step while refining (0 = full grid). |
+| `shell_backend`, `pdf_backend` | cpu | `cpu`, `cuda`, or `auto`. See [GPU acceleration](gpu.md). |
+| `gpu_device` | 0 | CUDA device index. |
+| `gpu_memory_fraction` | 0.7 | Share of GPU memory that may be used. |
+| `numba_threads` | all cores | CPU threads. |
+| `compute_pair_contributions_on_finish` | true | Partial pair contributions after the fit. |
+| `compute_warren_on_finish` | false | Warren analysis after the fit. |
+| `compute_local_trends_on_finish` | false | Local trends after the fit. |
+| `compute_esd` | false | Esds and correlation matrix after the fit. See [Esds](uncertainties.md). |
+| `esd_nyquist_correction` | false | Correct esds for correlated PDF points. |
+| `microstrain_model` | auto | `isotropic`, `wilkens`, `pah`, or `auto`. |

@@ -184,7 +184,9 @@ class StructureViewer(QtWidgets.QWidget):
 
         for site in structure.sites:
             try:
-                el = clean_el_symbol(str(site.specie))
+                el = clean_el_symbol(
+                    str(next(iter(site.species))).strip()
+                )
             except Exception:
                 el = "X"
 

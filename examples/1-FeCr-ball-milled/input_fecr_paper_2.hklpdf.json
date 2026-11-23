@@ -1,0 +1,179 @@
+{
+  "format": "hkl-pdf-project",
+  "version": 1,
+  "name": "input_FeCr_paper_2",
+  "refinement": {
+    "staged_refinement": false,
+    "refinement_r_step_final": 0.01,
+    "max_nfev_final": 60,
+    "ftol": 0.001,
+    "xtol": 0.001,
+    "gtol": 0.001,
+    "progress_every_sec": 0.5,
+    "compute_pair_contributions_on_finish": true,
+    "compute_warren_on_finish": true,
+    "compute_local_trends_on_finish": true,
+    "export_finite_coordination": true,
+    "shell_backend": "cpu",
+    "pdf_backend": "cpu",
+    "gpu_device": false,
+    "gpu_memory_fraction": 0.7,
+    "numba_threads": 16,
+    "stochastic_topology_workers": false,
+    "stochastic_collapse_realizations": true,
+    "stochastic_deduplicate_paths": true
+  },
+  "constraints": {
+    "ds1.fe_bcc_300k.re": "ds1.fe_bcc_300k.d"
+  },
+  "datasets": [
+    {
+      "id": "ds1",
+      "name": "FeCr_ID31",
+      "data_file": "FeCr_ID31.xy",
+      "r_min": 2.0,
+      "r_max": 150.0,
+      "r_extension": 1.2,
+      "parameters": {
+        "qdamp": {
+          "value": 0.011485099495637478
+        },
+        "delta_broad": {
+          "value": 0.0014090180673610453
+        },
+        "qmax": {
+          "value": 20.0
+        },
+        "qmax_zeros": {
+          "value": 5.0
+        }
+      },
+      "phases": [
+        {
+          "id": "fe_bcc_300k",
+          "name": "Fe_bcc_300K",
+          "cif": "Fe_bcc_300K.cif",
+          "active": true,
+          "settings": {
+            "microstrain_model": "wilkens",
+            "saxs_enabled": false,
+            "saxs_model": "sphere",
+            "saxs_apply_qdamp": false,
+            "saxs_apply_qmax": true
+          },
+          "parameters": {
+            "scale": {
+              "value": 0.26052888744906477,
+              "refine": true
+            },
+            "a": {
+              "value": 2.868393767539568,
+              "refine": true
+            },
+            "b": {
+              "value": 2.868393767539568
+            },
+            "c": {
+              "value": 2.868393767539568
+            },
+            "alpha": {
+              "value": 90.0
+            },
+            "beta": {
+              "value": 90.0
+            },
+            "gamma": {
+              "value": 90.0
+            },
+            "biso_fe": {
+              "value": 0.049999999999998934,
+              "refine": true
+            },
+            "fe": {
+              "value": 0.6171165297187995,
+              "refine": true,
+              "min": 0.0,
+              "max": 1.0
+            },
+            "CEdgeA": {
+              "value": 0.26528
+            },
+            "CEdgeB": {
+              "value": -0.35595
+            },
+            "CScrewA": {
+              "value": 0.307288
+            },
+            "CScrewB": {
+              "value": -0.819979
+            },
+            "x_fe1": {
+              "value": 0.0
+            },
+            "y_fe1": {
+              "value": 0.0
+            },
+            "z_fe1": {
+              "value": 0.0
+            },
+            "occ_fe1": {
+              "value": 1.0
+            },
+            "biso_Fe": {
+              "value": 0.30670856569306476,
+              "refine": true,
+              "min": 0.0,
+              "max": 10.0
+            },
+            "occ_pd1": {
+              "value": 1.0
+            },
+            "x_pd1": {
+              "value": 0.0
+            },
+            "y_pd1": {
+              "value": 0.0
+            },
+            "z_pd1": {
+              "value": 0.0
+            },
+            "rho": {
+              "value": 0.00017773340200886949,
+              "refine": true
+            },
+            "re": {
+              "value": 156.47258720122295
+            },
+            "delta2": {
+              "value": 2.0996351135983353,
+              "refine": true
+            },
+            "d": {
+              "value": 156.47258720122295,
+              "refine": true
+            },
+            "d_std": {
+              "value": 39.00707670884816,
+              "refine": true
+            }
+          },
+          "sections": {
+            "crystallite_shape": {
+              "mode": "conventional"
+            },
+            "stacking_refinement": {
+              "treatment": "fixed",
+              "transitions": [],
+              "stochastic_vectors": {}
+            },
+            "layer_stacking": {},
+            "stacking_search": {},
+            "stacking_vector_search": {},
+            "stacking_faults": {}
+          },
+          "extra": {}
+        }
+      ]
+    }
+  ]
+}

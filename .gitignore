@@ -93,3 +93,24 @@ installer-output/
 # Local backup archives
 /backups/
 *.zip
+# Leftovers from a virtual environment once created inside pdf_fitting/
+pdf_fitting/Lib/
+pdf_fitting/Scripts/
+pdf_fitting/Include/
+pdf_fitting/share/
+pdf_fitting/pyvenv.cfg
+
+# graphify knowledge-graph output (local tool)
+graphify-out/
+**/graphify-out/
+
+# Local run output and timing logs
+config/stacking_search_results/
+gui_timing.jsonl
+*.hklpdf.ds*.structure-view.json
+
+# Office lock files and drafts
+~$*
+
+# Structure-viewer state files (hold absolute paths; regenerated)
+examples/**/*.structure-view.json

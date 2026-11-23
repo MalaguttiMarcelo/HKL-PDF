@@ -183,6 +183,51 @@ class CudaResidentPdfBackend:
             n_pairs=n_pairs,
         )
 
+    def update_shell_frac(
+        self,
+        shell_frac: np.ndarray,
+    ) -> None:
+        """
+        Replace the shell fractional vectors (coordinate refinement).
+        """
+        cp = self.cp
+
+        with cp.cuda.Device(
+            self.device_id
+        ):
+            self.d_shell_frac = cp.asarray(
+                np.ascontiguousarray(
+                    shell_frac,
+                    dtype=np.float32,
+                ),
+                dtype=cp.float32,
+            )
+
+        self.d_cart = None
+        self.d_r_ij = None
+
+    def update_shell_mult_eff(
+        self,
+        shell_mult_eff: np.ndarray,
+    ) -> None:
+        """
+        Replace only the effective multiplicities (occupancy refinement).
+        """
+        cp = self.cp
+
+        with cp.cuda.Device(
+            self.device_id
+        ):
+            self.d_shell_mult_eff = cp.asarray(
+                np.ascontiguousarray(
+                    shell_mult_eff,
+                    dtype=np.float32,
+                ),
+                dtype=cp.float32,
+            )
+
+        self.d_amplitude = None
+
     def replace_shell_table(
         self,
         *,

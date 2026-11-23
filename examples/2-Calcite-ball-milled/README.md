@@ -1,15 +1,30 @@
 # Calcite ball-milled example
 
-This example demonstrates PDF fitting of a ball-milled calcite sample.
+PDF fitting of a calcite sample ball-milled for 150 minutes, with spherical
+crystallite size, pair-specific local correlations, and PAH microstrain.
 
 ## Files
 
-- `data/calcite.cif`: calcite structure.
-- `data/calcite_ball_milled.xy`: experimental PDF data.
-- `Calcite-conventional.inp`: conventional PDF fitting.
+| File | Contents |
+|---|---|
+| `Calcite.cif` | Calcite structure |
+| `5-CaCO3-150min.integrated.subtracted_bkg.corr.2th.qmax20.xy` | Experimental $G(r)$ ($Q_\mathrm{max}$ = 20 Å⁻¹) |
+| `calcite_150min.hklpdf.json` | Project for the project window (includes the saved fit) |
+| `Calcite_150min.inp` | Same model as an `.inp` file: conventional fit, 2–150 Å |
 
-## Conventional fit
+All paths are relative, so the example runs from any location.
 
-```ini
-[refinement]
-saxs_enabled = false
+## Running
+
+```bash
+python -m pdf_fitting.gui examples/2-Calcite-ball-milled/calcite_150min.hklpdf.json
+```
+
+Press **Calculate** (F5) to recalculate the saved fit, or **Refine** (F6).
+
+## What to try
+
+- **Atoms & occupancy:** make the O site anisotropic and refine its free
+  $\beta_{ij}$ components; view the ellipsoids in **Structure (3D)**.
+- **Microstructure:** the trigonal contrast-factor invariants are listed by
+  name; **Import contrast factors…** reads them from a file.

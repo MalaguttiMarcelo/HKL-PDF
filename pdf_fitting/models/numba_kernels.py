@@ -212,3 +212,210 @@ def accumulate_pair_gamma_histogram_by_pair(
 
             numerator[pid, idx] += gg * ww
             denominator[pid, idx] += ww
+
+# -----------------------------------------------------------------------------
+# Per-shell stages of PDFCalculator.evaluate (CPU path), parallel over shells.
+# Same arithmetic as the NumPy code they replace; they exist because those
+# element-wise passes over millions of shells ran on one core.
+# -----------------------------------------------------------------------------
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def shell_cart_and_distance(frac, MT, cart, r_out):
+    """cart = frac @ MT ; r = |cart| (frac (n,3), MT (3,3))."""
+    n = frac.shape[0]
+    for i in prange(n):
+        x = frac[i, 0] * MT[0, 0] + frac[i, 1] * MT[1, 0] + frac[i, 2] * MT[2, 0]
+        y = frac[i, 0] * MT[0, 1] + frac[i, 1] * MT[1, 1] + frac[i, 2] * MT[2, 1]
+        z = frac[i, 0] * MT[0, 2] + frac[i, 1] * MT[1, 2] + frac[i, 2] * MT[2, 2]
+        cart[i, 0] = x
+        cart[i, 1] = y
+        cart[i, 2] = z
+        r_out[i] = math.sqrt(x * x + y * y + z * z)
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def row_norms(cart, r_out):
+    n = cart.shape[0]
+    for i in prange(n):
+        r_out[i] = math.sqrt(cart[i, 0] * cart[i, 0] + cart[i, 1] * cart[i, 1] + cart[i, 2] * cart[i, 2])
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def shell_correlation(
+    r, upair_id, k_in, k_rank,
+    lam_mat,          # (n_upair, max_k) NaN = not given; (n_upair, 0) if none
+    lam_glob,         # (N_lambda,) global lambda_k by shell rank
+    pair_d1, pair_d2, # (n_upair,) NaN = use global
+    d1g, d2g,
+    out,
+):
+    """corr = max(1 − λ, 0) with λ from lambda_<pair>_<k>, lambda_<k> or δ1/r + δ2/r²."""
+    n = r.shape[0]
+    n_k = lam_mat.shape[1]
+    n_glob = lam_glob.shape[0]
+    for i in prange(n):
+        u = upair_id[i]
+        done = False
+        if n_k > 0:
+            k = k_in[i]
+            if k < n_k:
+                v = lam_mat[u, k]
+                if v == v:
+                    out[i] = 1.0 - v
+                    done = True
+        if not done and k_rank[i] < n_glob:
+            out[i] = 1.0 - lam_glob[k_rank[i]]
+            done = True
+        if not done:
+            d1 = pair_d1[u]
+            if d1 != d1:
+                d1 = d1g
+            d2 = pair_d2[u]
+            if d2 != d2:
+                d2 = d2g
+            ri = r[i]
+            out[i] = 1.0 - d1 / max(ri, 1e-12) - d2 / max(ri * ri, 1e-24)
+        if out[i] < 0.0:
+            out[i] = 0.0
+
+
+@njit(cache=True, fastmath=False)
+def _fstar_scalar(L, Re):
+    x = L / Re
+    if x <= 1.0:
+        xm = max(x, 1e-300)
+        return -math.log(xm) + 1.75 - math.log(2.0) + xm * xm / 6.0 - 32.0 * xm * xm * xm / (225.0 * _PI)
+    return 512.0 / (90.0 * _PI * x) - (11.0 / 24.0 + 0.25 * math.log(2.0 * x)) / (x * x)
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def wilkens_strain_L2(r, chkl_unique, inv_dirs, Re, pref, out):
+    """<ΔL²> = r²·pref·C_hkl·f*(r/Re) (pref = ρb²/4π), as the NumPy code (no clipping)."""
+    n = r.shape[0]
+    for i in prange(n):
+        ri = r[i]
+        out[i] = ri * ri * pref * chkl_unique[inv_dirs[i]] * _fstar_scalar(ri, Re)
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def pah_strain_L2(r, chkl_unique, inv_dirs, pah_a, pah_b, out):
+    n = r.shape[0]
+    for i in prange(n):
+        ri = r[i]
+        v = chkl_unique[inv_dirs[i]] * (pah_a * ri + pah_b * ri * ri)
+        out[i] = v if v > 0.0 else 0.0
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def shell_sigma(r, corr, biso_by_species, alpha_id, beta_id, strain_L2, c_dyn, delta_g, delta_broad, out):
+    """σ = sqrt(max(c·½(B_a + B_b)·corr + (δg r)² + (δb r)² + strain, 1e-24))."""
+    n = r.shape[0]
+    has_strain = strain_L2.shape[0] == n
+    for i in prange(n):
+        ri = r[i]
+        b = 0.5 * (biso_by_species[alpha_id[i]] + biso_by_species[beta_id[i]])
+        s2 = c_dyn * b * corr[i] + (delta_g * ri) ** 2 + (delta_broad * ri) ** 2
+        if has_strain:
+            s2 += strain_L2[i]
+        out[i] = math.sqrt(max(s2, 1e-24))
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def shell_sigma_adp(
+    r, corr, biso_by_species, alpha_id, beta_id, strain_L2, c_dyn, delta_g, delta_broad,
+    frac, Gm, adp_c, adp_n, rot, beta_entry, out,
+):
+    """
+    σ with anisotropic atoms. Per atom of a shell:
+        isotropic    B/8π²                 (= ½·c_dyn·B with c_dyn = 1/4π²)
+        anisotropic  wᵀ β w / 2π²,  w = Rᵀ v,  v = G f / r
+    (f fractional pair vector, G direct metric, R rotation mapping the ASU
+    site onto the atom, β of the ASU site). σ²_dyn = corr · (atom_a + atom_b).
+    """
+    n = r.shape[0]
+    has_strain = strain_L2.shape[0] == n
+    inv_2pi2 = 1.0 / (2.0 * _PI * _PI)
+    for i in prange(n):
+        ri = r[i]
+        f0 = frac[i, 0]
+        f1 = frac[i, 1]
+        f2 = frac[i, 2]
+        inv_r = 1.0 / max(ri, 1e-12)
+        v0 = (Gm[0, 0] * f0 + Gm[0, 1] * f1 + Gm[0, 2] * f2) * inv_r
+        v1 = (Gm[1, 0] * f0 + Gm[1, 1] * f1 + Gm[1, 2] * f2) * inv_r
+        v2 = (Gm[2, 0] * f0 + Gm[2, 1] * f1 + Gm[2, 2] * f2) * inv_r
+        dyn = 0.0
+        for side in range(2):
+            e = adp_c[i] if side == 0 else adp_n[i]
+            if e < 0:
+                sp = alpha_id[i] if side == 0 else beta_id[i]
+                dyn += 0.5 * c_dyn * biso_by_species[sp]
+            else:
+                # w = Rᵀ v
+                w0 = rot[e, 0, 0] * v0 + rot[e, 1, 0] * v1 + rot[e, 2, 0] * v2
+                w1 = rot[e, 0, 1] * v0 + rot[e, 1, 1] * v1 + rot[e, 2, 1] * v2
+                w2 = rot[e, 0, 2] * v0 + rot[e, 1, 2] * v1 + rot[e, 2, 2] * v2
+                b = beta_entry[e]
+                q = (b[0] * w0 * w0 + b[1] * w1 * w1 + b[2] * w2 * w2
+                     + 2.0 * (b[3] * w0 * w1 + b[4] * w0 * w2 + b[5] * w1 * w2))
+                dyn += q * inv_2pi2
+        s2 = dyn * corr[i] + (delta_g * ri) ** 2 + (delta_broad * ri) ** 2
+        if has_strain:
+            s2 += strain_L2[i]
+        out[i] = math.sqrt(max(s2, 1e-24))
+
+
+@njit(cache=True, fastmath=False, parallel=True)
+def cylinder_gamma_lognormal(cart, L, c_hat, d_grid, w_grid, mu, sigma, t_mean, out):
+    """
+    Σ_k w_k γ_cyl(L, D_k) per shell: the cylinder/disk common-volume factor
+    (lognormal thickness, Malagutti/Scardi A_TD) averaged over a diameter
+    quadrature. The thickness term does not depend on D and is computed once.
+    Same expressions, validity mask, clipping to [0, 1] and non-finite → 0
+    as PDFCalculator._cylinder_common_volume_shell_factor.
+    """
+    n = L.shape[0]
+    nd = d_grid.shape[0]
+    poly = sigma > 1e-12
+    s2 = sigma * sigma
+    sqrt2s = math.sqrt(2.0) * sigma
+    e_mu = math.exp(mu + 0.5 * s2)
+    pref_t = math.exp(-mu - 0.5 * s2) / _PI
+    for i in prange(n):
+        Li = L[i]
+        z = abs(cart[i, 0] * c_hat[0] + cart[i, 1] * c_hat[1] + cart[i, 2] * c_hat[2])
+        rp = math.sqrt(max(Li * Li - z * z, 0.0))
+        if not (math.isfinite(Li) and math.isfinite(z) and math.isfinite(rp) and Li > 0.0):
+            out[i] = 0.0
+            continue
+        if poly:
+            if z <= 1e-300:
+                tb = 2.0 * e_mu
+            else:
+                lnz = math.log(max(z, 1e-300))
+                tb = e_mu * (1.0 + math.erf((mu + s2 - lnz) / sqrt2s)) + z * (math.erfc((mu - lnz) / sqrt2s) - 2.0)
+            axial = 0.0
+        else:
+            tb = 0.0
+            axial = 1.0 - z / t_mean
+            if z >= t_mean or not math.isfinite(axial):
+                axial = 0.0
+            axial = min(max(axial, 0.0), 1.0)
+        acc = 0.0
+        for k in range(nd):
+            D = d_grid[k]
+            if not (rp < D):
+                continue
+            x = min(max(rp / D, 0.0), 1.0)
+            root = math.sqrt(max(1.0 - x * x, 0.0))
+            if poly:
+                radial_bracket = max(D * math.acos(x) - rp * root, 0.0)
+                g = pref_t / D * tb * radial_bracket
+            else:
+                g = (2.0 / _PI) * (math.acos(x) - x * root) * axial
+            if not math.isfinite(g):
+                g = 0.0
+            g = min(max(g, 0.0), 1.0)
+            acc += w_grid[k] * g
+        out[i] = acc

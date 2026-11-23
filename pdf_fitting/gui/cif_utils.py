@@ -319,14 +319,57 @@ def _make_structure_from_fast_cif(text: str, sites: List[Dict[str, Any]]) -> Opt
     species = []
     frac = []
 
-    for rec in sites:
-        el = clean_el_symbol(rec.get("el", ""))
+    labels = []
+
+    for index, rec in enumerate(sites):
+        el = clean_el_symbol(
+            rec.get(
+                "el",
+                "",
+            )
+        )
 
         if not el:
             continue
 
-        species.append(el)
-        frac.append(tuple(rec.get("frac", (0.0, 0.0, 0.0))))
+        occupancy = float(
+            rec.get(
+                "occ",
+                1.0,
+            )
+        )
+
+        occupancy = max(
+            0.0,
+            min(
+                occupancy,
+                1.0,
+            ),
+        )
+
+        species.append(
+            {
+                el: occupancy,
+            }
+        )
+
+        frac.append(
+            tuple(
+                rec.get(
+                    "frac",
+                    (0.0, 0.0, 0.0),
+                )
+            )
+        )
+
+        labels.append(
+            str(
+                rec.get(
+                    "label",
+                    f"site_{index + 1}",
+                )
+            ).strip()
+        )
 
     if not species:
         return None
@@ -347,6 +390,9 @@ def _make_structure_from_fast_cif(text: str, sites: List[Dict[str, Any]]) -> Opt
             frac,
             coords_are_cartesian=False,
             to_unit_cell=False,
+            site_properties={
+                "cif_label": labels,
+            },
         )
     except TypeError:
         return Structure(
@@ -354,6 +400,9 @@ def _make_structure_from_fast_cif(text: str, sites: List[Dict[str, Any]]) -> Opt
             species,
             frac,
             coords_are_cartesian=False,
+            site_properties={
+                "cif_label": labels,
+            },
         )
 
 

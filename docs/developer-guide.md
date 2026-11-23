@@ -4,35 +4,52 @@
 
 ```text
 pdf_fitting/
-├── fit_engine.py
-├── io_handler.py
-├── structure_handler.py
-├── user_paths.py
+├── fit_engine.py            least-squares driver, parameter pipeline
+├── uncertainty.py           esds and correlation matrix
+├── io_handler.py            .inp reader and writer
+├── structure_handler.py     shells, site symmetry, coordinates, ADPs
+├── user_paths.py            user data and cache folders
+├── project/                 Qt-free project model
+│   ├── model.py             Project / Dataset / Phase / Parameter, JSON
+│   ├── multiphase.py        one calculator per phase, combined residual
+│   ├── saved_results.py     compact storage of the last fit
+│   ├── edited_cif.py        derived CIFs from structure edits, ADP loops
+│   ├── structure_tools.py   orbits and symmetry helpers for the editor
+│   ├── free_peaks.py        free-peak fit
+│   ├── warren_fit.py        width analysis per direction
+│   └── contrast_factors.py  Laue-class invariants, contrast-factor files
 ├── models/
-│   ├── gr_model.py
-│   ├── numba_kernels.py
-│   ├── microstrain_utils.py
-│   ├── crystallite_shapes.py
-│   └── finite_shape_shells.py
+│   ├── gr_model.py          PDFCalculator
+│   ├── numba_kernels.py     parallel CPU kernels
+│   ├── direction_utils.py   shell directions
+│   ├── crystallite_shapes.py, finite_shape_shells.py
+│   ├── model_factory.py     chooses the model for a configuration
+│   ├── layer_stacking.py    stacking specification
+│   ├── dynamic_stacked_model.py          deterministic stacking
+│   ├── stochastic_stacked_pdf_model.py   stochastic stacking
+│   ├── compiled_stacked_* / compiled_stochastic_*   topology compilers
+│   ├── fast_unique.py       exact row grouping (optional GPU)
+│   └── gpu/                 CuPy backends
 └── gui/
-    ├── main.py
-    ├── mainwindow.py
-    ├── builder.py
-    ├── worker.py
-    ├── cs_grid_worker.py
-    ├── plots.py
-    ├── structure_view.py
-    └── fast_shape_viewer.py
+    ├── main.py              entry point (project or classic window)
+    ├── preload.py           background imports
+    ├── project_window/      project window, panels, structure page, peaks page
+    ├── structure_studio/    3D structure view
+    ├── finite_crystallite_builder/   shape and stacking builder
+    └── mainwindow.py, builder.py, worker.py, ...   classic window
 ```
 
 ## Calculation flow
 
-1. `read_input_file()` parses the INI file.
+1. `Project.load()` reads a JSON project, or `read_input_file()` an INI
+   file (converted to a one-phase project).
 2. `PDFCalculator` creates a `StructureHandler`.
 3. `StructureHandler` generates or loads packed shell arrays.
 4. `PDFCalculator.evaluate()` calculates distances, widths, partial PDFs,
    weights, baseline, damping, and termination effects.
-5. `FitEngine` sends residuals to `scipy.optimize.least_squares`.
+5. `FitEngine` sends residuals and its forward-difference Jacobian to
+   `scipy.optimize.least_squares`. Multi-phase projects combine one
+   calculator per phase (`project/multiphase.py`).
 6. GUI workers execute calculations outside the Qt main thread.
 7. Progress dictionaries are emitted to the GUI.
 
@@ -108,17 +125,11 @@ This prevents incompatible old caches from being loaded.
 pytest
 ```
 
-Recommended test areas:
+The maintained tests are in `tests/`. They cover multi-phase projects,
+saved results, shell directions, ADPs, esds, and the width analysis.
 
-- input parsing;
-- safe constraints;
-- lattice symmetry;
-- shell multiplicity;
-- finite coordination;
-- PDF normalization;
-- Qmax behaviour;
-- bounds;
-- worker stopping and pausing.
+The older tests in `pdf_fitting/test/` target an earlier stacking API and
+are not part of the default test run.
 
 ## Formatting
 
@@ -137,7 +148,8 @@ python -m build
 
 - X-ray weighting uses atomic-number approximations.
 - Site-labelled Biso values are averaged by element.
-- Site coordinates and occupancies do not yet regenerate packed shells during
-  refinement.
-- Analytic Jacobians are not implemented.
+- The main fit uses finite-difference Jacobians (the free-peak fit has an
+  analytic one).
+- Peak widths with anisotropic ADPs are calculated on the CPU.
 - Infinite-diameter finite slabs are not implemented.
+- AMD GPUs are not supported.

@@ -9,16 +9,39 @@ theme:
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - Quick start: quick-start.md
-  - Input format: input-format.md
-  - Models:
-      - Conventional fitting: models/conventional.md
+  - Getting started:
+      - Installation: installation.md
+      - Quick start: quick-start.md
+      - Graphical interface: gui.md
+  - Files:
+      - Project files (JSON): project-format.md
+      - Input files (.inp): input-format.md
+      - Parameter reference: parameters.md
+  - Fitting:
+      - Conventional fitting: conventional-fitting.md
+      - Model equations: equations.md
+      - Crystallite size: microcrystallin.md
+      - Microstrain: microstrain.md
+      - SAXS and missing low Q: saxs-model.md
+      - Finite crystallite shapes: finite-shapes.md
+      - Layer stacking and stacking faults: stacking-faults.md
+      - Anisotropic ADPs: adp.md
+      - Esds and correlations: uncertainties.md
+      - Free-peak fit and widths per direction: free-peaks.md
+  - Tools:
+      - Structure editor: structure-editor.md
+      - GPU acceleration and performance: gpu.md
+  - Model reference:
+      - Conventional: models/conventional.md
       - Spherical size: models/spherical-size.md
       - Cylinder and disk: models/cylinder-disk.md
       - SAXS belly: models/saxs-belly.md
       - Finite shape: models/finite-shape.md
       - Microstrain: models/microstrain.md
+  - Troubleshooting: troubleshooting.md
+  - Development:
+      - Developer guide: developer-guide.md
+      - Changelog: changelog.md
 
 markdown_extensions:
   - admonition

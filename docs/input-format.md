@@ -12,6 +12,10 @@ structure_file = structure.cif
 gr_data_file = experimental_gr.dat
 ```
 
+Relative paths are read relative to the folder of the input file. The
+project window can also save projects as JSON; see
+[Project files](project-format.md).
+
 ## Refinement range
 
 ```ini

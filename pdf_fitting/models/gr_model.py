@@ -22,6 +22,14 @@ from pdf_fitting.models.numba_kernels import (
     accumulate_gaussians_by_pair,
     accumulate_gaussians_by_shell_blocks,
     accumulate_pair_gamma_histogram_by_pair,
+    pah_strain_L2,
+    row_norms,
+    shell_cart_and_distance,
+    shell_correlation,
+    shell_sigma,
+    shell_sigma_adp,
+    wilkens_strain_L2,
+    cylinder_gamma_lognormal,
 )
 
 from pymatgen.core.periodic_table import Element
@@ -60,6 +68,28 @@ def clean_element_name(name: str) -> str:
     sym = m.group(1)
     return sym.upper() if len(sym) == 1 else sym[0].upper() + sym[1:].lower()
 
+def site_element_symbol(site) -> str:
+    """
+    Return an element symbol for an ordered or partially occupied pymatgen site.
+
+    Examples:
+        Zr       -> Zr
+        N0.575   -> N
+        C0.425   -> C
+    """
+    try:
+        return clean_element_name(
+            str(
+                next(
+                    iter(site.species)
+                )
+            ).strip()
+        )
+    except Exception:
+        return clean_element_name(
+            str(site.species_string)
+        )
+    
 def lambda_safe_species_label(name: str) -> str:
     """
     Convert species labels to safe lambda parameter labels.
@@ -423,9 +453,19 @@ class PDFCalculator:
             pass
 
         if structure_file is None:
-            structure_file = config["structure_file"]
+            structure_file = config[
+                "structure_file"
+            ]
 
         self.structure_file = structure_file
+
+        if isinstance(
+            structure_file,
+            str,
+        ):
+            self.structure_source_path = structure_file
+        else:
+            self.structure_source_path = ""
         self.gr_data_file = config.get("gr_data_file")
 
         self.r_min = float(config["r_min"])
@@ -450,6 +490,10 @@ class PDFCalculator:
                 )
                 or {}
             ),
+            coordinate_config={
+                "initial": config.get("initial", {}) or {},
+                "refinable": config.get("refinable", {}) or {},
+            },
         )
 
         self.constraints = self.structure_handler.get_constraints()
@@ -485,7 +529,8 @@ class PDFCalculator:
         self.spacegroup_number = int(sga.get_space_group_number())
         a, b, c, alpha, beta, gamma = self.structure_handler.structure.lattice.parameters
         self.cell = Cell(float(a), float(b), float(c), float(alpha), float(beta), float(gamma))
-
+        self._activate_geometry_metric()
+        
         # [contrast_factors] is deprecated/removed.
         # Contrast-factor coefficients are now normal parameters in:
         #   [initial_values]
@@ -563,12 +608,30 @@ class PDFCalculator:
 
         self._pdf_backend_active = "cpu"
         self._cuda_pdf_backend = None
+        self._dynamic_stacked_cuda_pdf_backend = None
 
-        if self._pdf_backend_requested in (
-            "cuda",
-            "gpu",
-            "cupy",
-            "auto",
+
+        self._defer_cuda_pdf_backend = bool(
+            (
+                config.get(
+                    "refinement",
+                    {},
+                )
+                or {}
+            ).get(
+                "defer_cuda_pdf_backend",
+                False,
+            )
+        )
+
+        if (
+            not self._defer_cuda_pdf_backend
+            and self._pdf_backend_requested in (
+                "cuda",
+                "gpu",
+                "cupy",
+                "auto",
+            )
         ):
             try:
                 from pdf_fitting.models.gpu.backend import (
@@ -634,25 +697,61 @@ class PDFCalculator:
                     f"{exc}"
                 )
 
-        print(
-            "[PDF BACKEND] "
-            f"requested={self._pdf_backend_requested}, "
-            f"active={self._pdf_backend_active}"
-        )
+        if self._defer_cuda_pdf_backend:
+            print(
+                "[PDF BACKEND] "
+                f"requested={self._pdf_backend_requested}, "
+                "active=deferred_for_dynamic_stacked_model"
+            )
+        else:
+            print(
+                "[PDF BACKEND] "
+                f"requested={self._pdf_backend_requested}, "
+                f"active={self._pdf_backend_active}"
+            )
+
+        
 
     def _init_composition_constants(self) -> None:
-        species = [clean_element_name(str(site.specie)) for site in self.structure_handler.structure.sites]
+        species = [
+            site_element_symbol(site)
+            for site in self.structure_handler.structure.sites
+        ]
+
         self._species_all = np.array(species, dtype=object)
         self._unique_species = sorted(set(species))
         self._species_index = {s: i for i, s in enumerate(self._unique_species)}
-        self._counts = np.array([species.count(s) for s in self._unique_species], dtype=np.int64)
-        self._n_total = int(self._counts.sum())
+        self._Z = np.array([Element(s).Z for s in self._unique_species], dtype=float)
 
-        conc = self._counts.astype(float) / max(self._n_total, 1)
+        counts = np.array(
+            [species.count(s) for s in self._unique_species],
+            dtype=np.float64,
+        )
+
+        self._set_composition_weights(counts)
+
+        # Periodic shell tables carry occupancy terms: weight the shells and
+        # the composition with the CIF occupancies (later overridden by any
+        # occ_<site> parameters during evaluate()).
+        if getattr(self, "_occ", None) is not None:
+            self._apply_occupancies(None, force=True)
+
+    def _set_composition_weights(self, counts: np.ndarray) -> None:
+        """
+        Set atom counts per cell, concentrations and Faber-Ziman weights.
+
+        ``counts`` are atoms per cell per species in self._unique_species
+        order. They are occupancy-weighted when occupancy terms are active,
+        so they need not be integers.
+        """
+        self._counts = np.asarray(counts, dtype=np.float64)
+        self._n_total = float(self._counts.sum())
+
+        conc = self._counts / max(self._n_total, 1.0e-12)
         self._concentrations = conc
-        Z = np.array([Element(s).Z for s in self._unique_species], dtype=float)
-        self._Z = Z
-        self._Z_avg = float(np.sum(conc * Z))
+        Z = self._Z
+        # Guard against an all-zero occupancy set during refinement.
+        self._Z_avg = max(float(np.sum(conc * Z)), 1.0e-12)
 
         # Unordered Faber–Ziman weights (pair key is sorted species tuple).
         # IMPORTANT:
@@ -693,8 +792,28 @@ class PDFCalculator:
 
         Everything needed in the hot G(r) loop must be numeric arrays.
         """
+        self._geometry_mode = "periodic_fractional"
+
+        self._shell_cart_fixed = None
+
+        self._stacking_lattice_matrix = None
+        self._stacking_inverse_lattice_matrix = None
+        self._stacking_reciprocal_lattice_matrix = None
+
+        self._stacking_volume = None
+        self._stacking_bulk_atom_count = None
+        self._stacking_bulk_number_density = None
+
+        self._stacking_symmetry_symbol = None
+        self._stacking_symmetry_number = None
+        self._stacking_cell = None
+
         # Species list used to build stable indices
-        species = [clean_element_name(str(site.specie)) for site in self.structure_handler.structure.sites]
+        species = [
+            site_element_symbol(site)
+            for site in self.structure_handler.structure.sites
+        ]
+
         unique_species = sorted(set(species))
         sp_index = {s: i for i, s in enumerate(unique_species)}
 
@@ -813,6 +932,167 @@ class PDFCalculator:
         This bypasses Python dict shells entirely, which is important when
         r_max is large (e.g. 100 Å) and the shell list is huge.
         """
+        self._geometry_mode = str(
+            shell_table.get(
+                "geometry_mode",
+                "periodic_fractional",
+            )
+        ).strip().lower()
+
+        shell_cart_value = shell_table.get(
+            "shell_cart",
+            None,
+        )
+
+        if shell_cart_value is None:
+            self._shell_cart_fixed = None
+        else:
+            self._shell_cart_fixed = np.asarray(
+                shell_cart_value,
+                dtype=self._dtype,
+            )
+
+        stacking_lattice_value = shell_table.get(
+            "stacking_lattice_matrix",
+            None,
+        )
+
+        if stacking_lattice_value is None:
+            self._stacking_lattice_matrix = None
+            self._stacking_inverse_lattice_matrix = None
+            self._stacking_reciprocal_lattice_matrix = None
+            self._stacking_volume = None
+            self._stacking_bulk_atom_count = None
+            self._stacking_bulk_number_density = None
+            self._stacking_symmetry_symbol = None
+            self._stacking_symmetry_number = None
+            self._stacking_cell = None
+
+        else:
+            self._stacking_lattice_matrix = np.asarray(
+                stacking_lattice_value,
+                dtype=float,
+            )
+
+            inverse_value = shell_table.get(
+                "stacking_inverse_lattice_matrix",
+                None,
+            )
+
+            if inverse_value is None:
+                self._stacking_inverse_lattice_matrix = np.linalg.inv(
+                    self._stacking_lattice_matrix
+                )
+            else:
+                self._stacking_inverse_lattice_matrix = np.asarray(
+                    inverse_value,
+                    dtype=float,
+                )
+
+            reciprocal_value = shell_table.get(
+                "stacking_reciprocal_lattice_matrix",
+                None,
+            )
+
+            if reciprocal_value is None:
+                from pymatgen.core import Lattice
+
+                stacking_lattice = Lattice(
+                    self._stacking_lattice_matrix
+                )
+
+                self._stacking_reciprocal_lattice_matrix = np.asarray(
+                    stacking_lattice
+                    .reciprocal_lattice_crystallographic
+                    .matrix,
+                    dtype=float,
+                )
+            else:
+                self._stacking_reciprocal_lattice_matrix = np.asarray(
+                    reciprocal_value,
+                    dtype=float,
+                )
+
+            self._stacking_volume = float(
+                shell_table.get(
+                    "stacking_volume",
+                    abs(
+                        np.linalg.det(
+                            self._stacking_lattice_matrix
+                        )
+                    ),
+                )
+            )
+
+            self._stacking_bulk_atom_count = int(
+                shell_table.get(
+                    "bulk_atom_count",
+                    0,
+                )
+            )
+
+            density_value = shell_table.get(
+                "stacking_bulk_number_density",
+                None,
+            )
+
+            if density_value is None:
+                if (
+                    self._stacking_bulk_atom_count > 0
+                    and self._stacking_volume > 1.0e-12
+                ):
+                    density_value = (
+                        self._stacking_bulk_atom_count
+                        / self._stacking_volume
+                    )
+                else:
+                    density_value = 0.0
+
+            self._stacking_bulk_number_density = float(
+                density_value
+            )
+
+            self._stacking_symmetry_symbol = str(
+                shell_table.get(
+                    "stacking_symmetry_symbol",
+                    "P1",
+                )
+            )
+
+            self._stacking_symmetry_number = int(
+                shell_table.get(
+                    "stacking_symmetry_number",
+                    1,
+                )
+            )
+
+            from pdf_fitting.models.microstrain_utils import (
+                Cell,
+            )
+
+            from pymatgen.core import Lattice
+
+            stacking_lattice = Lattice(
+                self._stacking_lattice_matrix
+            )
+
+            (
+                stacking_a,
+                stacking_b,
+                stacking_c,
+                stacking_alpha,
+                stacking_beta,
+                stacking_gamma,
+            ) = stacking_lattice.parameters
+
+            self._stacking_cell = Cell(
+                float(stacking_a),
+                float(stacking_b),
+                float(stacking_c),
+                float(stacking_alpha),
+                float(stacking_beta),
+                float(stacking_gamma),
+            )
         # Validate expected keys
         required = (
             "shell_frac",
@@ -838,6 +1118,17 @@ class PDFCalculator:
 
         # Enforce dtype choices
         self._shell_frac = np.asarray(shell_table["shell_frac"], dtype=self._dtype)
+        if self._shell_cart_fixed is not None:
+            if (
+                self._shell_cart_fixed.ndim != 2
+                or self._shell_cart_fixed.shape[1] != 3
+                or self._shell_cart_fixed.shape[0]
+                != self._shell_frac.shape[0]
+            ):
+                raise ValueError(
+                    "shell_cart must have shape (n_shell, 3) and match "
+                    "the shell_frac row count."
+                )
         self._shell_mult = np.asarray(shell_table["shell_mult"], dtype=np.int32)
 
         self._shell_bulk_mult = np.asarray(
@@ -893,68 +1184,702 @@ class PDFCalculator:
         # Cached strain direction arrays, if present in the shell cache.
         self._loaded_strain_unique_dirs = shell_table.get("strain_unique_dirs", None)
         self._loaded_strain_inv_dirs = shell_table.get("strain_inv_dirs", None)
-        
+
+        self._load_occupancy_terms(shell_table)
+        self._load_coordinate_terms(shell_table)
+        self._load_adp_terms(shell_table)
+
         self._prepare_shell_runtime_arrays()
 
+    # ------------------------------------------------------------------
+    # Anisotropic displacement parameters (beta)
+    # ------------------------------------------------------------------
+    def _load_adp_terms(self, shell_table: dict) -> None:
+        """
+        Per-shell (ASU site, rotation) entries of anisotropic atoms
+        (StructureHandler, sites with beta<ij>_<key> parameters).
+        """
+        self._adp = None
+        c = np.asarray(shell_table.get("shell_adp_center", np.zeros(0)), dtype=np.int32)
+        n = np.asarray(shell_table.get("shell_adp_neighbor", np.zeros(0)), dtype=np.int32)
+        if self._uses_fixed_stacked_geometry() or c.size == 0 or c.size != len(self._shell_mult):
+            return
+        if not (np.any(c >= 0) or np.any(n >= 0)):
+            return
+        handler = self.structure_handler
+        keys = list(getattr(handler, "occupancy_group_keys", []) or [])
+        groups = np.asarray(shell_table.get("adp_entry_group", np.zeros(0)), dtype=np.int32)
+        self._adp = {
+            "center": c,
+            "neighbor": n,
+            "rot": np.ascontiguousarray(np.asarray(shell_table["adp_rotations"], dtype=np.float64).reshape(-1, 3, 3)),
+            "entry_group": groups,
+            "group_keys": keys,
+            "site_sym": dict(getattr(handler, "adp_site_symmetry", {}) or {}),
+        }
+        print(f"[ADP] anisotropic sites: {', '.join(sorted({keys[g] for g in groups}))} ({len(groups)} orientation(s))")
 
+    def adp_beta_by_group(self, params: dict) -> dict:
+        """{group: β (6,)} from the free beta<ij>_<key> components (site symmetry)."""
+        if self._adp is None:
+            return {}
+        return self.structure_handler.adp_beta_from_params(params)
+
+    def symmetrized_adp_params(self, params: dict) -> dict:
+        if self._adp is None:
+            return params
+        return self.structure_handler.symmetrized_adp_params(params)
+
+    def _adp_entry_betas(self, params: dict) -> np.ndarray:
+        by_group = self.adp_beta_by_group(params)
+        groups = self._adp["entry_group"]
+        out = np.zeros((len(groups), 6), dtype=np.float64)
+        for e, g in enumerate(groups):
+            out[e] = by_group.get(int(g), 0.0)
+        return out
+
+    def _load_coordinate_terms(self, shell_table: dict) -> None:
+        """
+        Load ungrouped movable-site rows for fractional-coordinate
+        refinement (periodic StructureHandler tables only).
+        """
+        self._xyz = None
+        self._xyz_last_params = None
+
+        if self._uses_fixed_stacked_geometry():
+            return
+
+        dyn_shell = shell_table.get("dyn_shell", None)
+
+        if dyn_shell is None or len(dyn_shell) == 0:
+            return
+
+        handler = getattr(self, "structure_handler", None)
+        groups = getattr(handler, "coordinate_groups", None) or {}
+
+        if not groups:
+            return
+
+        dyn_shell = np.asarray(dyn_shell, dtype=np.int64)
+
+        if int(dyn_shell.max()) >= int(self._shell_frac.shape[0]):
+            print(
+                "[XYZ] Movable-row table does not match the shell table; "
+                "coordinate refinement is disabled for this table."
+            )
+            return
+
+        moving_sites = np.concatenate(
+            [grp["sites"] for grp in groups.values()]
+        )
+        moving_rot = np.concatenate(
+            [grp["rotations"] for grp in groups.values()]
+        )
+        moving_group = np.concatenate(
+            [
+                np.full(len(grp["sites"]), g, dtype=np.int64)
+                for g, grp in groups.items()
+            ]
+        )
+
+        n_sites = len(self.structure_handler.structure.sites)
+
+        self._xyz = {
+            "dyn_shell": dyn_shell,
+            "center": np.asarray(shell_table["dyn_center_site"], dtype=np.int64),
+            "neighbor": np.asarray(shell_table["dyn_neighbor_site"], dtype=np.int64),
+            "base": np.asarray(shell_table["dyn_base_fvec"], dtype=np.float64),
+            "moving_sites": moving_sites,
+            "moving_rot": moving_rot,
+            "moving_group": moving_group,
+            "n_sites": n_sites,
+        }
+
+        print(
+            f"[XYZ] Coordinate refinement active: {len(groups)} movable "
+            f"site group(s), {dyn_shell.size:,} ungrouped pair row(s)."
+        )
+
+    def _apply_coordinates(self, params: dict | None) -> None:
+        """
+        Update the fractional vectors of ungrouped rows from the current
+        x_/y_/z_ parameters. No-op when unchanged.
+        """
+        xyz = getattr(self, "_xyz", None)
+
+        if xyz is None:
+            return
+
+        handler = self.structure_handler
+        shifts = handler.coordinate_shifts_from_params(params)
+
+        signature = np.concatenate(
+            [shifts[g] for g in sorted(shifts)]
+        ) if shifts else np.zeros(0)
+
+        last = self._xyz_last_params
+
+        if (
+            last is not None
+            and last.shape == signature.shape
+            and np.array_equal(last, signature)
+        ):
+            return
+
+        site_delta = np.zeros((xyz["n_sites"], 3), dtype=np.float64)
+
+        delta_by_row = np.stack(
+            [shifts[int(g)] for g in xyz["moving_group"]]
+        )
+
+        site_delta[xyz["moving_sites"]] = np.einsum(
+            "nij,nj->ni",
+            xyz["moving_rot"],
+            delta_by_row,
+        )
+
+        fvec = (
+            xyz["base"]
+            + site_delta[xyz["neighbor"]]
+            - site_delta[xyz["center"]]
+        )
+
+        if not self._shell_frac.flags.writeable:
+            self._shell_frac = np.array(self._shell_frac, copy=True)
+
+        self._shell_frac[xyz["dyn_shell"]] = fvec.astype(
+            self._shell_frac.dtype,
+            copy=False,
+        )
+
+        self._xyz_last_params = signature
+
+        self._warren_cache_key = None
+        self._warren_cache_value = None
+        self._local_trends_cache_key = None
+        self._local_trends_cache_value = None
+
+        backend = getattr(self, "_cuda_pdf_backend", None)
+
+        if backend is not None and hasattr(backend, "update_shell_frac"):
+            backend.update_shell_frac(self._shell_frac)
+
+    def _load_occupancy_terms(self, shell_table: dict) -> None:
+        """
+        Load occupancy arrays from a periodic StructureHandler shell table.
+
+        Tables built elsewhere (finite crystallites, stacking supercells)
+        have no occupancy terms; occupancy parameters are then ignored.
+        """
+        self._occ = None
+        self._occ_last_group_values = None
+
+        required = (
+            "site_occupancy",
+            "site_species_id",
+            "site_occ_group",
+            "occ_term_shell",
+            "occ_term_center_group",
+            "occ_term_neighbor_group",
+            "occ_term_weight",
+            "occ_group_keys",
+        )
+
+        if any(key not in shell_table for key in required):
+            return
+
+        if self._uses_fixed_stacked_geometry():
+            return
+
+        term_shell = np.asarray(shell_table["occ_term_shell"], dtype=np.int64)
+        n_shell = int(self._shell_mult.shape[0])
+
+        if term_shell.size and int(term_shell.max()) >= n_shell:
+            print(
+                "[OCCUPANCY] Occupancy terms do not match the shell table; "
+                "occupancy refinement is disabled for this table."
+            )
+            return
+
+        group_keys = [str(k) for k in shell_table["occ_group_keys"]]
+        site_group = np.asarray(shell_table["site_occ_group"], dtype=np.int64)
+        site_occ = np.asarray(shell_table["site_occupancy"], dtype=np.float64)
+        n_groups = len(group_keys)
+
+        group_base = np.bincount(
+            site_group,
+            weights=site_occ,
+            minlength=n_groups,
+        ) / np.maximum(
+            np.bincount(site_group, minlength=n_groups),
+            1,
+        )
+
+        # Element ids of the table map to model species by symbol.
+        table_species = [str(s) for s in shell_table["unique_species"]]
+
+        self._occ = {
+            "group_keys": group_keys,
+            "param_names": [f"occ_{k}" for k in group_keys],
+            "group_base": group_base.astype(np.float64),
+            "site_group": site_group,
+            "site_species_id": np.asarray(
+                shell_table["site_species_id"],
+                dtype=np.int64,
+            ),
+            "table_species": table_species,
+            "term_shell": term_shell,
+            "term_center": np.asarray(
+                shell_table["occ_term_center_group"],
+                dtype=np.int64,
+            ),
+            "term_neighbor": np.asarray(
+                shell_table["occ_term_neighbor_group"],
+                dtype=np.int64,
+            ),
+            "term_weight": np.asarray(
+                shell_table["occ_term_weight"],
+                dtype=np.float64,
+            ),
+            "n_shell": n_shell,
+        }
+
+    def _group_occupancies_from_params(self, params: dict | None) -> np.ndarray:
+        """
+        Current occupancy of every occupancy group (CIF value unless an
+        occ_<key> parameter is given), clipped to [0, 1].
+        """
+        occ = self._occ
+        values = occ["group_base"].copy()
+
+        if not params:
+            return values
+
+        lookup = {}
+
+        for k, v in params.items():
+            kl = str(k).strip().lower()
+
+            if kl.startswith("occ_"):
+                lookup[kl] = v
+
+        if not lookup:
+            return values
+
+        for i, name in enumerate(occ["param_names"]):
+            value = lookup.get(name)
+
+            if value is None:
+                continue
+
+            try:
+                values[i] = min(max(float(value), 0.0), 1.0)
+            except (TypeError, ValueError):
+                pass
+
+        return values
+
+    def _apply_occupancies(
+        self,
+        params: dict | None,
+        *,
+        force: bool = False,
+    ) -> None:
+        """
+        Update shell multiplicities and composition for the current
+        occupancies.
+
+        For a shell s of element pair (a, b):
+
+            mult_eff[s] = sum_terms w * occ[center] * occ[neighbor] / N_a
+
+        with N_a = sum of occupancies of all a sites in the cell. With all
+        occupancies equal to one this reproduces the cached multiplicities.
+        Composition (concentrations, number density, Faber-Ziman weights)
+        is recomputed from the occupancy-weighted atom counts.
+        """
+        occ = getattr(self, "_occ", None)
+
+        if occ is None:
+            if params and not getattr(self, "_warned_occ_unsupported", False):
+                if any(
+                    str(k).strip().lower().startswith("occ_")
+                    for k in params
+                ):
+                    refinable = (self.config.get("refinable", {}) or {})
+
+                    if any(
+                        str(k).strip().lower().startswith("occ_") and bool(v)
+                        for k, v in refinable.items()
+                    ):
+                        self._warned_occ_unsupported = True
+                        print(
+                            "[OCCUPANCY] Occupancy parameters are ignored for "
+                            "this shell table (finite crystallite or stacked "
+                            "geometry). Only periodic structures support "
+                            "occupancy refinement."
+                        )
+            return
+
+        group_values = self._group_occupancies_from_params(params)
+
+        last = self._occ_last_group_values
+
+        if (
+            not force
+            and last is not None
+            and last.shape == group_values.shape
+            and np.array_equal(last, group_values)
+        ):
+            return
+
+        site_values = group_values[occ["site_group"]]
+
+        n_table_species = len(occ["table_species"])
+
+        atom_count_table = np.bincount(
+            occ["site_species_id"],
+            weights=site_values,
+            minlength=n_table_species,
+        )
+
+        term_values = (
+            occ["term_weight"]
+            * group_values[occ["term_center"]]
+            * group_values[occ["term_neighbor"]]
+        )
+
+        mult = np.bincount(
+            occ["term_shell"],
+            weights=term_values,
+            minlength=occ["n_shell"],
+        )
+
+        alpha_count = atom_count_table[self._shell_alpha_id.astype(np.int64)]
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mult = np.where(alpha_count > 0.0, mult / alpha_count, 0.0)
+
+        mult = mult.astype(self._dtype, copy=False)
+
+        self._shell_mult_eff = mult
+        self._shell_finite_mult_eff = mult
+        self._shell_bulk_mult_eff = mult
+
+        # Model species order may differ from the table order.
+        counts = np.zeros(len(self._unique_species), dtype=np.float64)
+
+        for table_id, symbol in enumerate(occ["table_species"]):
+            model_id = self._species_index.get(symbol)
+
+            if model_id is not None:
+                counts[model_id] += atom_count_table[table_id]
+
+        self._set_composition_weights(counts)
+
+        self._occ_last_group_values = group_values
+
+        # Results derived from multiplicities or composition are stale.
+        self._warren_cache_key = None
+        self._warren_cache_value = None
+        self._local_trends_cache_key = None
+        self._local_trends_cache_value = None
+
+        backend = getattr(self, "_cuda_pdf_backend", None)
+
+        if backend is not None and hasattr(backend, "update_shell_mult_eff"):
+            backend.update_shell_mult_eff(mult)
+
+    def _uses_fixed_stacked_geometry(
+        self,
+    ) -> bool:
+        """
+        Return True when the current shell table came from the fixed-geometry
+        stacking-supercell backend.
+        """
+        geometry_mode = str(
+            getattr(
+                self,
+                "_geometry_mode",
+                "",
+            )
+        ).strip().lower()
+
+        return (
+            geometry_mode
+            in {
+                "stacked_supercell",
+                "dynamic_stacked_supercell",
+                "stochastic_ensemble",
+            }
+            and getattr(
+                self,
+                "_shell_cart_fixed",
+                None,
+            )
+            is not None
+        )
+
+
+    def _shell_cartesian_vectors(
+        self,
+        lattice_matrix_current: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Return current shell Cartesian vectors.
+
+        Conventional crystal
+            shell_frac is transformed with the current refined lattice.
+
+        Fixed stacked geometry
+            shell_cart from the stacked shell backend is authoritative.
+
+        During this Phase-4 implementation, lattice parameters and stacking
+        distance must remain fixed for stacked geometry.
+        """
+        if self._uses_fixed_stacked_geometry():
+            return np.asarray(
+                self._shell_cart_fixed,
+                dtype=self._dtype,
+            )
+
+        return (
+            self._shell_frac
+            @ np.asarray(
+                lattice_matrix_current,
+                dtype=self._dtype,
+            ).T
+        )
+
+
+    def _activate_geometry_metric(
+        self,
+    ) -> None:
+        """
+        Select the metric used for hkl-dependent strain calculations.
+        """
+        if (
+            self._uses_fixed_stacked_geometry()
+            and self._stacking_cell is not None
+        ):
+            self.cell = self._stacking_cell
+
+            self.spacegroup_number = int(
+                self._stacking_symmetry_number
+                if self._stacking_symmetry_number is not None
+                else 1
+            )
+
+
+    def _current_number_density_and_species_densities(
+        self,
+        conventional_volume: float,
+    ):
+        """
+        Return total and species number densities.
+
+        For fixed stacking geometry, use the periodic stacking-supercell
+        reference density. For conventional geometry, retain the existing
+        source-cell behavior.
+        """
+        if self._uses_fixed_stacked_geometry():
+            rho0 = float(
+                self._stacking_bulk_number_density
+                or 0.0
+            )
+
+            if rho0 <= 0.0:
+                atom_count = int(
+                    self._stacking_bulk_atom_count
+                    or 0
+                )
+
+                volume = float(
+                    self._stacking_volume
+                    or 0.0
+                )
+
+                if (
+                    atom_count > 0
+                    and volume > 1.0e-12
+                ):
+                    rho0 = (
+                        atom_count
+                        / volume
+                    )
+
+            if rho0 <= 0.0:
+                raise ValueError(
+                    "The stacked shell table has no valid periodic bulk "
+                    "number density."
+                )
+
+            species_densities = (
+                np.asarray(
+                    self._concentrations,
+                    dtype=float,
+                )
+                * rho0
+            )
+
+            return (
+                float(rho0),
+                species_densities,
+            )
+
+        volume = float(
+            conventional_volume
+        )
+
+        if (
+            not np.isfinite(volume)
+            or volume <= 1.0e-12
+        ):
+            raise ValueError(
+                "The conventional unit-cell volume is invalid."
+            )
+
+        # Occupancy-weighted atom count per cell when occupancy terms are
+        # active; otherwise the plain site count.
+        if getattr(self, "_occ", None) is not None:
+            number_of_atoms = float(
+                self._n_total
+            )
+        else:
+            number_of_atoms = float(
+                len(
+                    self.structure_handler.structure.sites
+                )
+            )
+
+        rho0 = (
+            number_of_atoms
+            / volume
+        )
+
+        species_densities = (
+            self._counts.astype(float)
+            / volume
+        )
+
+        return (
+            float(rho0),
+            species_densities,
+        )
+
+    
     def _finite_gamma_by_pair_on_grid(
         self,
         r_grid: np.ndarray,
         r_ij: np.ndarray,
     ) -> np.ndarray:
         """
-        Build discrete gamma_finite(r) for each ordered pair channel.
+        Build a smooth finite-shape gamma(r) baseline for every ordered pair.
 
-        Option A:
-            - no smoothing
-            - no interpolation
-            - each shell contributes to the nearest r-grid point
-            - empty r-grid points remain gamma = 0
+        The finite shell table contains the atomistic finite coordination:
 
-        For each shell:
+            shell_gamma =
+                finite_coordination_per_alpha
+                /
+                bulk_coordination_per_alpha
 
-            shell_gamma = finite_mult_eff / bulk_mult_eff
+        At discrete shell distances this is exact for the selected atomistic
+        finite crystallite.
 
-        To average multiple shells falling into the same r-bin, use the bulk
-        effective coordination as the weight:
+        For the continuous PDF baseline:
 
-            gamma_bin =
-                sum(shell_gamma * bulk_mult_eff) / sum(bulk_mult_eff)
+            G(r) = 4*pi*rho0*r*[g(r) - gamma(r)]
 
-        Since:
-            shell_gamma * bulk_mult_eff = finite_mult_eff
+        gamma must also exist between shell distances. Therefore this method:
 
-        this is equivalent to:
-            gamma_bin = sum(finite_mult_eff) / sum(bulk_mult_eff)
+        1. combines shell gamma values at identical r values;
+        2. weights them by bulk effective coordination;
+        3. inserts gamma(0) = 1;
+        4. linearly interpolates onto the PDF r grid;
+        5. sets gamma(r) = 0 beyond the largest finite shell distance.
+
+        This is analogous to the interpolation used by the cylinder/disk
+        common-volume implementation.
         """
-        r_grid = np.asarray(r_grid, dtype=float)
-        r_ij = np.asarray(r_ij, dtype=float)
+        r_grid = np.asarray(
+            r_grid,
+            dtype=float,
+        )
 
-        n_pair = int(self._n_pairs)
-        n_r = int(r_grid.size)
+        r_ij = np.asarray(
+            r_ij,
+            dtype=float,
+        )
 
-        gamma_by_pair = np.zeros((n_pair, n_r), dtype=self._dtype)
+        n_pair = int(
+            self._n_pairs
+        )
 
-        if n_pair <= 0 or n_r <= 0 or r_ij.size == 0:
+        n_r = int(
+            r_grid.size
+        )
+
+        gamma_by_pair = np.zeros(
+            (
+                n_pair,
+                n_r,
+            ),
+            dtype=self._dtype,
+        )
+
+        if (
+            n_pair <= 0
+            or n_r <= 0
+            or r_ij.size == 0
+        ):
             return gamma_by_pair
 
-        shell_gamma = getattr(self, "_shell_gamma", None)
-        shell_bulk_mult_eff = getattr(self, "_shell_bulk_mult_eff", None)
+        shell_gamma = getattr(
+            self,
+            "_shell_gamma",
+            None,
+        )
 
-        if shell_gamma is None or shell_bulk_mult_eff is None:
+        shell_bulk_mult_eff = getattr(
+            self,
+            "_shell_bulk_mult_eff",
+            None,
+        )
+
+        shell_pair_id = getattr(
+            self,
+            "_shell_pair_id",
+            None,
+        )
+
+        if (
+            shell_gamma is None
+            or shell_bulk_mult_eff is None
+            or shell_pair_id is None
+        ):
             return gamma_by_pair
 
-        shell_gamma = np.asarray(shell_gamma, dtype=float)
-        shell_bulk_mult_eff = np.asarray(shell_bulk_mult_eff, dtype=float)
-        shell_pair_id = np.asarray(self._shell_pair_id, dtype=np.int64)
+        shell_gamma = np.asarray(
+            shell_gamma,
+            dtype=float,
+        )
+
+        shell_bulk_mult_eff = np.asarray(
+            shell_bulk_mult_eff,
+            dtype=float,
+        )
+
+        shell_pair_id = np.asarray(
+            shell_pair_id,
+            dtype=np.int64,
+        )
 
         valid = (
             np.isfinite(r_ij)
             & np.isfinite(shell_gamma)
             & np.isfinite(shell_bulk_mult_eff)
+            & (r_ij > 0.0)
             & (shell_bulk_mult_eff > 0.0)
-            & (r_ij >= float(r_grid[0]))
-            & (r_ij <= float(r_grid[-1]))
             & (shell_pair_id >= 0)
             & (shell_pair_id < n_pair)
         )
@@ -962,48 +1887,130 @@ class PDFCalculator:
         if not np.any(valid):
             return gamma_by_pair
 
-        rv = r_ij[valid]
-        gv = shell_gamma[valid]
-        bv = shell_bulk_mult_eff[valid]
-        pv = shell_pair_id[valid]
+        r_valid = r_ij[valid]
+        gamma_valid = shell_gamma[valid]
+        bulk_weight_valid = shell_bulk_mult_eff[valid]
+        pair_valid = shell_pair_id[valid]
 
-        idx_right = np.searchsorted(r_grid, rv, side="left")
-        idx_right = np.clip(idx_right, 0, n_r - 1)
+        for pair_id in range(n_pair):
+            pair_mask = pair_valid == pair_id
 
-        idx_left = np.clip(idx_right - 1, 0, n_r - 1)
+            if not np.any(pair_mask):
+                continue
 
-        dist_left = np.abs(rv - r_grid[idx_left])
-        dist_right = np.abs(rv - r_grid[idx_right])
+            r_pair = r_valid[pair_mask]
+            gamma_pair = gamma_valid[pair_mask]
+            bulk_weight_pair = bulk_weight_valid[pair_mask]
 
-        idx = np.where(dist_left <= dist_right, idx_left, idx_right).astype(np.int64)
+            # Group shell values at the same physical distance.
+            # The finite-shell code itself rounds distances approximately
+            # at 1e-5 Å, so use the same resolution here.
+            r_key = np.rint(
+                r_pair * 1.0e5
+            ).astype(
+                np.int64
+            )
 
-        flat = pv * n_r + idx
+            unique_key, inverse = np.unique(
+                r_key,
+                return_inverse=True,
+            )
 
-        numerator = np.bincount(
-            flat,
-            weights=gv * bv,
-            minlength=n_pair * n_r,
-        )
+            numerator = np.bincount(
+                inverse,
+                weights=gamma_pair * bulk_weight_pair,
+                minlength=unique_key.size,
+            )
 
-        denominator = np.bincount(
-            flat,
-            weights=bv,
-            minlength=n_pair * n_r,
-        )
+            denominator = np.bincount(
+                inverse,
+                weights=bulk_weight_pair,
+                minlength=unique_key.size,
+            )
 
-        numerator = numerator.reshape(n_pair, n_r)
-        denominator = denominator.reshape(n_pair, n_r)
+            good = denominator > 0.0
 
-        mask = denominator > 0.0
+            if not np.any(good):
+                continue
 
-        gamma = np.zeros_like(numerator, dtype=float)
-        gamma[mask] = numerator[mask] / denominator[mask]
+            r_known = (
+                unique_key[good].astype(float)
+                / 1.0e5
+            )
 
-        gamma_by_pair[:, :] = gamma.astype(self._dtype, copy=False)
+            gamma_known = (
+                numerator[good]
+                / denominator[good]
+            )
+
+            finite_known = (
+                np.isfinite(r_known)
+                & np.isfinite(gamma_known)
+            )
+
+            r_known = r_known[finite_known]
+            gamma_known = gamma_known[finite_known]
+
+            if r_known.size == 0:
+                continue
+
+            order = np.argsort(
+                r_known
+            )
+
+            r_known = r_known[order]
+            gamma_known = gamma_known[order]
+
+            # gamma(0) must be exactly 1:
+            # at zero separation, the common volume equals particle volume.
+            if r_known[0] > 1.0e-12:
+                r_known = np.concatenate(
+                    (
+                        np.asarray(
+                            [0.0],
+                            dtype=float,
+                        ),
+                        r_known,
+                    )
+                )
+
+                gamma_known = np.concatenate(
+                    (
+                        np.asarray(
+                            [1.0],
+                            dtype=float,
+                        ),
+                        gamma_known,
+                    )
+                )
+            else:
+                gamma_known[0] = 1.0
+
+            gamma_interp = np.interp(
+                r_grid,
+                r_known,
+                gamma_known,
+                left=1.0,
+                right=0.0,
+            )
+
+            gamma_interp = np.clip(
+                gamma_interp,
+                0.0,
+                1.0,
+            )
+
+            gamma_by_pair[
+                pair_id,
+                :
+            ] = gamma_interp.astype(
+                self._dtype,
+                copy=False,
+            )
 
         return gamma_by_pair
 
-  
+        
     def _cylinder_common_volume_shell_factor(
         self,
         params: dict,
@@ -1151,9 +2158,17 @@ class PDFCalculator:
         # Reuse Cartesian shell vectors already computed in evaluate().
         # This avoids one large matrix multiplication per PDF evaluation.
         if cart_vectors is None:
-            cart = np.asarray(self._shell_frac, dtype=float) @ M.T
+            cart = np.asarray(
+                self._shell_cartesian_vectors(
+                    M
+                ),
+                dtype=float,
+            )
         else:
-            cart = np.asarray(cart_vectors, dtype=float)
+            cart = np.asarray(
+                cart_vectors,
+                dtype=float,
+            )
 
         L = np.asarray(r_ij, dtype=float)
 
@@ -1554,6 +2569,67 @@ class PDFCalculator:
         return False
 
 
+    def _cylinder_gamma_fused(self, params, lattice_tuple, r_ij, cart_vectors, diameter_mean, diameter_std):
+        """
+        Parallel version of the diameter-averaged cylinder shell γ (numba
+        kernel cylinder_gamma_lognormal); same parameters and quadrature as
+        _lognormal_average_cylinder_shell_gamma / _cylinder_common_volume_shell_factor.
+        """
+        params = params or {}
+        has_direct = (
+            any(k in params for k in ("cyl_mu", "cylinder_mu", "disk_mu"))
+            and any(k in params for k in ("cyl_sigma", "cylinder_sigma", "disk_sigma"))
+        )
+        if has_direct:
+            mu = float(params.get("cyl_mu", params.get("cylinder_mu", params.get("disk_mu", 0.0))))
+            sigma = float(params.get("cyl_sigma", params.get("cylinder_sigma", params.get("disk_sigma", 0.0))))
+            t_mean = float(np.exp(mu + 0.5 * sigma * sigma)) if sigma > 0.0 else float(np.exp(mu))
+        else:
+            t_mean = float(params.get("cyl_thickness", params.get("cylinder_thickness", params.get("disk_thickness", 0.0))))
+            t_std = float(params.get("cyl_thickness_std", params.get("cylinder_thickness_std", params.get("disk_thickness_std", 0.0))))
+            if t_mean <= 0.0:
+                return np.ones_like(r_ij, dtype=self._dtype)
+            if t_std > 1e-12:
+                s2 = np.log(1.0 + (t_std * t_std) / (t_mean * t_mean))
+                sigma = float(np.sqrt(s2))
+                mu = float(np.log(t_mean) - 0.5 * s2)
+            else:
+                sigma = 0.0
+                mu = float(np.log(t_mean))
+        if sigma <= 1e-12 and t_mean <= 0.0:
+            return np.ones_like(r_ij, dtype=self._dtype)
+        ah = int(round(float(params.get("cyl_axis_h", 0))))
+        ak = int(round(float(params.get("cyl_axis_k", 0))))
+        al = int(round(float(params.get("cyl_axis_l", 1))))
+        if ah == 0 and ak == 0 and al == 0:
+            ah, ak, al = 0, 0, 1
+        M = lattice_matrix(*lattice_tuple).astype(float, copy=False)
+        cart = np.asarray(self._shell_cartesian_vectors(M) if cart_vectors is None else cart_vectors, dtype=np.float64)
+        axis_cart = np.asarray([ah, ak, al], dtype=float) @ M.T
+        n_axis = float(np.linalg.norm(axis_cart))
+        c_hat = axis_cart / n_axis if n_axis > 1e-14 else np.asarray([0.0, 0.0, 1.0])
+        if diameter_std <= 1e-12:
+            d_grid = np.asarray([diameter_mean], dtype=float)
+            w_grid = np.ones(1)
+        else:
+            s2d = np.log(1.0 + (diameter_std * diameter_std) / (diameter_mean * diameter_mean))
+            sd = float(np.sqrt(s2d))
+            md = float(np.log(diameter_mean) - 0.5 * s2d)
+            d_min = max(1e-6, diameter_mean * 0.05)
+            d_max = diameter_mean + 4.0 * diameter_std
+            if d_max <= d_min:
+                d_max = diameter_mean * 3.0
+            d_grid = np.linspace(d_min, d_max, 15)
+            pdf = 1.0 / (d_grid * sd * np.sqrt(2.0 * np.pi)) * np.exp(-0.5 * ((np.log(d_grid) - md) / sd) ** 2)
+            w_grid = pdf / max(float(np.sum(pdf)), 1e-300)
+        out = np.empty(len(r_ij), dtype=np.float64)
+        cylinder_gamma_lognormal(
+            np.ascontiguousarray(cart), np.ascontiguousarray(np.asarray(r_ij, dtype=np.float64)),
+            np.ascontiguousarray(c_hat, dtype=np.float64), np.ascontiguousarray(d_grid, dtype=np.float64),
+            np.ascontiguousarray(w_grid, dtype=np.float64), float(mu), float(sigma), float(t_mean), out,
+        )
+        return out.astype(self._dtype, copy=False)
+
     def _lognormal_average_cylinder_shell_gamma(
         self,
         params_for_cylinder: dict,
@@ -1577,6 +2653,13 @@ class PDFCalculator:
 
         if diameter_mean <= 0.0:
             return np.ones_like(r_ij, dtype=self._dtype)
+
+        if get_num_threads is not None:
+            fast = self._cylinder_gamma_fused(
+                params_for_cylinder, lattice_tuple, r_ij, cart_vectors, diameter_mean, diameter_std,
+            )
+            if fast is not None:
+                return fast
 
         if diameter_std <= 1e-12:
             p = dict(params_for_cylinder)
@@ -1857,15 +2940,35 @@ class PDFCalculator:
         # ---------------------------------------------------------
         from pymatgen.core import Lattice
 
-        num_atoms = len(self.structure_handler.structure.sites)
-        vol = float(Lattice.from_parameters(*lattice_tuple).volume)
+        vol = float(
+            Lattice.from_parameters(
+                *lattice_tuple
+            ).volume
+        )
 
-        if not np.isfinite(vol) or vol <= 1.0e-12:
-            return np.zeros_like(r_grid, dtype=float)
+        if (
+            not np.isfinite(
+                vol
+            )
+            or vol <= 1.0e-12
+        ):
+            return np.zeros_like(
+                r_grid,
+                dtype=float,
+            )
 
-        rho0 = float(num_atoms) / vol
+        (
+            rho0,
+            _species_densities,
+        ) = self._current_number_density_and_species_densities(
+            vol
+        )
 
-        norm = 4.0 * np.pi * rho0
+        norm = (
+            4.0
+            * np.pi
+            * rho0
+        )
 
         scale = float(params.get("scale", 1.0))
         saxs_scale = float(self._saxs_scale(params))
@@ -1874,7 +2977,9 @@ class PDFCalculator:
         # Shell distances
         # ---------------------------------------------------------
         M = lattice_matrix(*lattice_tuple).astype(self._dtype, copy=False)
-        cart = self._shell_frac @ M.T
+        cart = self._shell_cartesian_vectors(
+            M
+        )
         r_ij = np.sqrt(np.sum(cart * cart, axis=1)).astype(self._dtype, copy=False)
 
         r32 = np.asarray(r_grid, dtype=self._dtype)
@@ -2100,30 +3205,53 @@ class PDFCalculator:
             dtype=float,
         )
 
-    def replace_shell_table(self, shell_table: dict) -> None:
+    def replace_shell_table(
+        self,
+        shell_table: dict,
+        *,
+        device_shell_table=None,
+    ) -> None:
         """
-        Replace the current shell table with an externally generated shell table.
+        Replace the current shell table.
 
-        Used by finite crystallite-shape grid search.
+        Conventional shell table
+            Fractional shell vectors continue to follow the current refined
+            parent lattice.
 
-        Important:
-        - shell_table must be compatible with _load_shell_table_arrays()
-        - composition constants and direction caches are rebuilt
+        Fixed stacked shell table
+            shell_cart is authoritative. The stacking-supercell metric and
+            periodic bulk density are activated. CUDA PDF accumulation is
+            disabled until a dedicated stacked CUDA backend is implemented.
         """
-        self._load_shell_table_arrays(shell_table)
+        self._load_shell_table_arrays(
+            shell_table
+        )
 
-        # Recompute Faber-Ziman weights and pair metadata because pair table may differ.
+        self._activate_geometry_metric()
+
         self._init_composition_constants()
 
-        # Recompute contrast-factor matrix because shell directions may differ.
-        self._prepare_contrast_factor_matrix()
+        self._cf_feature_names = []
+        self._cf_feature_matrix = None
 
-        # Clear plot/helper caches that depend on shell arrays.
         self._warren_cache_key = None
         self._warren_cache_value = None
 
         self._local_trends_cache_key = None
         self._local_trends_cache_value = None
+
+        self._chkl_cache_key = None
+        self._chkl_cache_values = None
+
+        if self._uses_fixed_stacked_geometry():
+            if self._cuda_pdf_backend is not None:
+                print(
+                    "[STACKED PDF] Fixed stacked geometry currently uses "
+                    "the CPU PDF accumulator. CUDA PDF accumulation is "
+                    "disabled for this shell table."
+                )
+
+            return
 
         if self._cuda_pdf_backend is not None:
             self._cuda_pdf_backend.replace_shell_table(
@@ -2136,6 +3264,208 @@ class PDFCalculator:
                 strain_inv_dirs=self._strain_inv_dirs,
                 n_pairs=self._n_pairs,
             )
+
+    def update_dynamic_stacked_geometry(
+        self,
+        *,
+        shell_cart: np.ndarray,
+        shell_frac: np.ndarray,
+        shell_mult_eff: np.ndarray,
+        shell_bulk_mult_eff: np.ndarray,
+        shell_gamma: np.ndarray,
+        shell_active: np.ndarray,
+        stacking_lattice_matrix: np.ndarray,
+        stacking_inverse_lattice_matrix: np.ndarray,
+        stacking_volume: float,
+        stacking_bulk_number_density: float,
+        stacking_spacing: float,
+        stacking_period_height: float,
+    ) -> None:
+        """
+        Update metric-dependent arrays for a compiled dynamic stacked model.
+
+        Static pair metadata, pair IDs, offsets, direction assignments and
+        topology are preserved.
+        """
+        shell_cart = np.asarray(
+            shell_cart,
+            dtype=self._dtype,
+        )
+
+        shell_frac = np.asarray(
+            shell_frac,
+            dtype=self._dtype,
+        )
+
+        shell_mult_eff = np.asarray(
+            shell_mult_eff,
+            dtype=self._dtype,
+        )
+
+        shell_bulk_mult_eff = np.asarray(
+            shell_bulk_mult_eff,
+            dtype=self._dtype,
+        )
+
+        shell_gamma = np.asarray(
+            shell_gamma,
+            dtype=self._dtype,
+        )
+
+        shell_active = np.asarray(
+            shell_active,
+            dtype=bool,
+        )
+
+        number_of_shells = int(
+            self._shell_frac.shape[0]
+        )
+
+        for name, array in (
+            (
+                "shell_cart",
+                shell_cart,
+            ),
+            (
+                "shell_frac",
+                shell_frac,
+            ),
+            (
+                "shell_mult_eff",
+                shell_mult_eff,
+            ),
+            (
+                "shell_bulk_mult_eff",
+                shell_bulk_mult_eff,
+            ),
+            (
+                "shell_gamma",
+                shell_gamma,
+            ),
+            (
+                "shell_active",
+                shell_active,
+            ),
+        ):
+            if array.shape[0] != number_of_shells:
+                raise ValueError(
+                    f"{name} has {array.shape[0]} rows, expected "
+                    f"{number_of_shells}."
+                )
+
+        self._geometry_mode = (
+            "dynamic_stacked_supercell"
+        )
+
+        self._shell_cart_fixed = shell_cart
+        self._shell_frac = shell_frac
+
+        # Inactive topology-margin rows must contribute zero amplitude.
+        active_float = shell_active.astype(
+            self._dtype,
+        )
+
+        self._shell_mult_eff = (
+            shell_mult_eff
+            * active_float
+        )
+
+        self._shell_finite_mult_eff = (
+            self._shell_mult_eff.copy()
+        )
+
+        self._shell_bulk_mult_eff = (
+            shell_bulk_mult_eff
+            * active_float
+        )
+
+        self._shell_gamma = (
+            shell_gamma
+            * active_float
+        )
+
+        self._dynamic_shell_active = (
+            shell_active
+        )
+
+        self._stacking_lattice_matrix = np.asarray(
+            stacking_lattice_matrix,
+            dtype=float,
+        )
+
+        self._stacking_inverse_lattice_matrix = np.asarray(
+            stacking_inverse_lattice_matrix,
+            dtype=float,
+        )
+
+        self._stacking_volume = float(
+            stacking_volume
+        )
+
+        self._stacking_bulk_number_density = float(
+            stacking_bulk_number_density
+        )
+
+        self._stacking_nominal_spacing = float(
+            stacking_spacing
+        )
+
+        self._stacking_period_normal_height = float(
+            stacking_period_height
+        )
+
+        from pymatgen.core import Lattice
+
+        stacking_lattice = Lattice(
+            self._stacking_lattice_matrix
+        )
+
+        (
+            lattice_a,
+            lattice_b,
+            lattice_c,
+            lattice_alpha,
+            lattice_beta,
+            lattice_gamma,
+        ) = stacking_lattice.parameters
+
+        self._stacking_cell = Cell(
+            float(
+                lattice_a
+            ),
+            float(
+                lattice_b
+            ),
+            float(
+                lattice_c
+            ),
+            float(
+                lattice_alpha
+            ),
+            float(
+                lattice_beta
+            ),
+            float(
+                lattice_gamma
+            ),
+        )
+
+        self.cell = self._stacking_cell
+
+        # The direction identities remain fixed, but their metric-dependent
+        # contrast-factor feature matrix must follow the current cell.
+        self._cf_feature_names = []
+        self._cf_feature_matrix = None
+
+        self._chkl_cache_key = None
+        self._chkl_cache_values = None
+
+        self._warren_cache_key = None
+        self._warren_cache_value = None
+
+        self._local_trends_cache_key = None
+        self._local_trends_cache_value = None
+
 
     def shape_function(self, r, d, dstd):
         """
@@ -2920,6 +4250,678 @@ class PDFCalculator:
 
         return float(fallback)
 
+    def build_shape_factor_directions(
+        self,
+        params: dict,
+        *,
+        max_r: float | None = None,
+        r_round_decimals: int = 5,
+        include_interpolated: bool = True,
+    ) -> dict:
+        """
+        Build diagnostic shape-factor gamma curves.
+
+        This is intentionally separate from PDF evaluation and is calculated
+        only on demand by the Shape Factors GUI tab.
+
+        Supported model modes
+        ---------------------
+        Conventional sphere:
+            Returns one isotropic analytical gamma(r) curve.
+
+        Conventional cylinder/disk:
+            Returns direction-resolved analytical common-volume gamma(r)
+            calculated using _cylinder_common_volume_shell_factor().
+
+        Finite shape:
+            Returns direction-resolved atomistic gamma(r) from the finite
+            shell table:
+
+                gamma = finite_mult_eff / bulk_mult_eff
+
+        Output format
+        -------------
+        {
+            "mode": "sphere" | "cylinder" | "finite_shape" | "none",
+            "isotropic": bool,
+            "directions": {
+                (h, k, l): {
+                    "r": np.ndarray,
+                    "gamma": np.ndarray,
+                    "r_interpolated": np.ndarray,
+                    "gamma_interpolated": np.ndarray,
+                    "n_shell_rows": int,
+                    "finite_mult_eff": np.ndarray,
+                    "bulk_mult_eff": np.ndarray,
+                }
+            },
+            "metadata": {...},
+        }
+
+        Notes
+        -----
+        - `r` / `gamma` are discrete shell values.
+        - `r_interpolated` / `gamma_interpolated` are the smooth curves used
+          for visual inspection. The finite PDF baseline uses equivalent
+          interpolation logic.
+        """
+        params = dict(
+            params
+            or {}
+        )
+
+        out = {
+            "mode": "none",
+            "isotropic": False,
+            "directions": {},
+            "metadata": {},
+        }
+
+        shape_cfg = self.config.get(
+            "crystallite_shape",
+            {},
+        ) or {}
+
+        shape_mode = str(
+            shape_cfg.get(
+                "mode",
+                "conventional",
+            )
+        ).strip().lower()
+
+        # ---------------------------------------------------------
+        # Current constrained lattice
+        # ---------------------------------------------------------
+        lat0 = self.structure_handler.structure.lattice
+
+        a = float(
+            params.get(
+                "a",
+                lat0.a,
+            )
+        )
+
+        b = float(
+            params.get(
+                "b",
+                lat0.b,
+            )
+        )
+
+        c = float(
+            params.get(
+                "c",
+                lat0.c,
+            )
+        )
+
+        alpha = float(
+            params.get(
+                "alpha",
+                lat0.alpha,
+            )
+        )
+
+        beta = float(
+            params.get(
+                "beta",
+                lat0.beta,
+            )
+        )
+
+        gamma = float(
+            params.get(
+                "gamma",
+                lat0.gamma,
+            )
+        )
+
+        lattice_dict = {
+            "a": a,
+            "b": b,
+            "c": c,
+            "alpha": alpha,
+            "beta": beta,
+            "gamma": gamma,
+        }
+
+        lattice_dict = apply_lattice_constraints(
+            lattice_dict,
+            self.constraints,
+        )
+
+        lattice_tuple = (
+            float(
+                lattice_dict["a"]
+            ),
+            float(
+                lattice_dict["b"]
+            ),
+            float(
+                lattice_dict["c"]
+            ),
+            float(
+                lattice_dict["alpha"]
+            ),
+            float(
+                lattice_dict["beta"]
+            ),
+            float(
+                lattice_dict["gamma"]
+            ),
+        )
+
+        M = lattice_matrix(
+            *lattice_tuple
+        ).astype(
+            self._dtype,
+            copy=False,
+        )
+
+        shell_cart = np.asarray(
+            self._shell_cartesian_vectors(
+                M
+            ),
+            dtype=float,
+        )
+
+        shell_r = np.sqrt(
+            np.sum(
+                shell_cart
+                * shell_cart,
+                axis=1,
+            )
+        )
+
+        if max_r is None:
+            if shell_r.size:
+                max_r_use = float(
+                    np.nanmax(
+                        shell_r
+                    )
+                )
+            else:
+                max_r_use = float(
+                    self.r_max
+                )
+        else:
+            max_r_use = float(
+                max_r
+            )
+
+        if (
+            not np.isfinite(
+                max_r_use
+            )
+            or max_r_use <= 0.0
+        ):
+            max_r_use = float(
+                self.r_max
+            )
+
+        # ---------------------------------------------------------
+        # Analytical sphere
+        # ---------------------------------------------------------
+        cyl_diameter = float(
+            params.get(
+                "cyl_diameter",
+                0.0,
+            )
+        )
+
+        cyl_thickness = float(
+            params.get(
+                "cyl_thickness",
+                0.0,
+            )
+        )
+
+        cylinder_active = (
+            cyl_diameter > 0.0
+            and cyl_thickness > 0.0
+            and shape_mode != "finite_shape"
+        )
+
+        if (
+            shape_mode != "finite_shape"
+            and not cylinder_active
+        ):
+            diameter = float(
+                params.get(
+                    "d",
+                    params.get(
+                        "D",
+                        0.0,
+                    ),
+                )
+            )
+
+            diameter_std = float(
+                params.get(
+                    "d_std",
+                    0.0,
+                )
+            )
+
+            if diameter <= 0.0:
+                return out
+
+            n_points = max(
+                300,
+                int(
+                    min(
+                        5000,
+                        max_r_use * 25.0,
+                    )
+                ),
+            )
+
+            r_grid = np.linspace(
+                0.0,
+                max(
+                    max_r_use,
+                    diameter,
+                ),
+                n_points,
+            )
+
+            gamma_grid = self.shape_function(
+                r_grid,
+                diameter,
+                diameter_std,
+            )
+
+            out["mode"] = "sphere"
+            out["isotropic"] = True
+
+            out["directions"] = {
+                (0, 0, 0): {
+                    "r": np.asarray(
+                        r_grid,
+                        dtype=float,
+                    ),
+                    "gamma": np.asarray(
+                        gamma_grid,
+                        dtype=float,
+                    ),
+                    "r_interpolated": np.asarray(
+                        r_grid,
+                        dtype=float,
+                    ),
+                    "gamma_interpolated": np.asarray(
+                        gamma_grid,
+                        dtype=float,
+                    ),
+                    "n_shell_rows": 0,
+                    "finite_mult_eff": np.asarray(
+                        [],
+                        dtype=float,
+                    ),
+                    "bulk_mult_eff": np.asarray(
+                        [],
+                        dtype=float,
+                    ),
+                }
+            }
+
+            out["metadata"] = {
+                "diameter_angstrom": float(
+                    diameter
+                ),
+                "diameter_std_angstrom": float(
+                    diameter_std
+                ),
+                "label": "Isotropic sphere",
+            }
+
+            return out
+
+        # ---------------------------------------------------------
+        # Direction-resolved finite/cylinder/disk data
+        # ---------------------------------------------------------
+        shell_direction = np.asarray(
+            self._shell_direction,
+            dtype=np.int32,
+        )
+
+        shell_pair_id = np.asarray(
+            self._shell_pair_id,
+            dtype=np.int32,
+        )
+
+        valid = (
+            np.isfinite(
+                shell_r
+            )
+            & (shell_r > 0.0)
+            & (shell_r <= max_r_use)
+        )
+
+        if not np.any(
+            valid
+        ):
+            return out
+
+        if shape_mode == "finite_shape":
+            shell_gamma = np.asarray(
+                getattr(
+                    self,
+                    "_shell_gamma",
+                    np.ones_like(
+                        shell_r,
+                    ),
+                ),
+                dtype=float,
+            )
+
+            shell_bulk_eff = np.asarray(
+                getattr(
+                    self,
+                    "_shell_bulk_mult_eff",
+                    np.ones_like(
+                        shell_r,
+                    ),
+                ),
+                dtype=float,
+            )
+
+            shell_finite_eff = np.asarray(
+                getattr(
+                    self,
+                    "_shell_finite_mult_eff",
+                    self._shell_mult_eff,
+                ),
+                dtype=float,
+            )
+
+            out["mode"] = "finite_shape"
+            out["isotropic"] = False
+
+        else:
+            shell_gamma = np.asarray(
+                self._cylinder_common_volume_shell_factor(
+                    params,
+                    lattice_tuple,
+                    shell_r,
+                    cart_vectors=shell_cart,
+                ),
+                dtype=float,
+            )
+
+            shell_bulk_eff = np.asarray(
+                getattr(
+                    self,
+                    "_shell_bulk_mult_eff",
+                    self._shell_mult_eff,
+                ),
+                dtype=float,
+            )
+
+            shell_finite_eff = (
+                shell_gamma
+                * shell_bulk_eff
+            )
+
+            out["mode"] = "cylinder"
+            out["isotropic"] = False
+
+        direction_to_rows = {}
+
+        for row_index in np.where(
+            valid
+        )[0]:
+            direction = tuple(
+                int(value)
+                for value in shell_direction[
+                    row_index
+                ]
+            )
+
+            if direction == (
+                0,
+                0,
+                0,
+            ):
+                continue
+
+            direction_to_rows.setdefault(
+                direction,
+                [],
+            ).append(
+                int(
+                    row_index
+                )
+            )
+
+        for direction, rows in direction_to_rows.items():
+            rows_array = np.asarray(
+                rows,
+                dtype=np.int64,
+            )
+
+            r_values = shell_r[
+                rows_array
+            ]
+
+            gamma_values = shell_gamma[
+                rows_array
+            ]
+
+            bulk_values = shell_bulk_eff[
+                rows_array
+            ]
+
+            finite_values = shell_finite_eff[
+                rows_array
+            ]
+
+            # Group directions at equal shell distances.
+            r_key = np.rint(
+                r_values
+                * (
+                    10
+                    ** int(
+                        r_round_decimals
+                    )
+                )
+            ).astype(
+                np.int64
+            )
+
+            unique_r_key, inverse = np.unique(
+                r_key,
+                return_inverse=True,
+            )
+
+            finite_sum = np.bincount(
+                inverse,
+                weights=finite_values,
+                minlength=unique_r_key.size,
+            )
+
+            bulk_sum = np.bincount(
+                inverse,
+                weights=bulk_values,
+                minlength=unique_r_key.size,
+            )
+
+            gamma_sum = np.zeros_like(
+                finite_sum,
+                dtype=float,
+            )
+
+            positive_bulk = bulk_sum > 0.0
+
+            gamma_sum[
+                positive_bulk
+            ] = (
+                finite_sum[
+                    positive_bulk
+                ]
+                / bulk_sum[
+                    positive_bulk
+                ]
+            )
+
+            r_discrete = (
+                unique_r_key.astype(
+                    float
+                )
+                / (
+                    10
+                    ** int(
+                        r_round_decimals
+                    )
+                )
+            )
+
+            order = np.argsort(
+                r_discrete
+            )
+
+            r_discrete = r_discrete[
+                order
+            ]
+
+            gamma_sum = gamma_sum[
+                order
+            ]
+
+            finite_sum = finite_sum[
+                order
+            ]
+
+            bulk_sum = bulk_sum[
+                order
+            ]
+
+            if include_interpolated:
+                n_interp = max(
+                    300,
+                    int(
+                        min(
+                            5000,
+                            max_r_use * 25.0,
+                        )
+                    ),
+                )
+
+                r_interp = np.linspace(
+                    0.0,
+                    max_r_use,
+                    n_interp,
+                )
+
+                if r_discrete.size:
+                    r_known = r_discrete
+                    gamma_known = gamma_sum
+
+                    if r_known[0] > 1.0e-12:
+                        r_known = np.concatenate(
+                            (
+                                np.asarray(
+                                    [0.0],
+                                    dtype=float,
+                                ),
+                                r_known,
+                            )
+                        )
+
+                        gamma_known = np.concatenate(
+                            (
+                                np.asarray(
+                                    [1.0],
+                                    dtype=float,
+                                ),
+                                gamma_known,
+                            )
+                        )
+
+                    gamma_interp = np.interp(
+                        r_interp,
+                        r_known,
+                        gamma_known,
+                        left=1.0,
+                        right=0.0,
+                    )
+
+                else:
+                    r_interp = np.asarray(
+                        [],
+                        dtype=float,
+                    )
+
+                    gamma_interp = np.asarray(
+                        [],
+                        dtype=float,
+                    )
+
+            else:
+                r_interp = np.asarray(
+                    [],
+                    dtype=float,
+                )
+
+                gamma_interp = np.asarray(
+                    [],
+                    dtype=float,
+                )
+
+            out["directions"][
+                direction
+            ] = {
+                "r": np.asarray(
+                    r_discrete,
+                    dtype=float,
+                ),
+                "gamma": np.asarray(
+                    gamma_sum,
+                    dtype=float,
+                ),
+                "r_interpolated": np.asarray(
+                    r_interp,
+                    dtype=float,
+                ),
+                "gamma_interpolated": np.asarray(
+                    gamma_interp,
+                    dtype=float,
+                ),
+                "n_shell_rows": int(
+                    rows_array.size
+                ),
+                "finite_mult_eff": np.asarray(
+                    finite_sum,
+                    dtype=float,
+                ),
+                "bulk_mult_eff": np.asarray(
+                    bulk_sum,
+                    dtype=float,
+                ),
+            }
+
+        out["metadata"] = {
+            "shape_type": str(
+                shape_cfg.get(
+                    "shape_type",
+                    "finite",
+                )
+            ),
+            "pair_count": int(
+                len(
+                    np.unique(
+                        shell_pair_id[
+                            valid
+                        ]
+                    )
+                )
+            ),
+            "max_r_angstrom": float(
+                max_r_use
+            ),
+        }
+
+        return out
+    
     def build_local_trends(self, params: dict, *, max_r_plot: float = 10.0) -> dict:
         """
         Build local lambda/delta trends up to max_r_plot.
@@ -3007,9 +5009,24 @@ class PDFCalculator:
             # ---------------------------------------------------------
             # Pair distances
             # ---------------------------------------------------------
-            M = lattice_matrix(*lattice_tuple)
-            cart = shell_frac @ M.T
-            r_ij = np.sqrt(np.sum(cart * cart, axis=1))
+            M = lattice_matrix(
+                *lattice_tuple
+            )
+
+            cart = np.asarray(
+                self._shell_cartesian_vectors(
+                    M
+                ),
+                dtype=float,
+            )
+
+            r_ij = np.sqrt(
+                np.sum(
+                    cart
+                    * cart,
+                    axis=1,
+                )
+            )
 
             valid = (
                 np.isfinite(r_ij)
@@ -3222,9 +5239,24 @@ class PDFCalculator:
                 float(lattice_dict["gamma"]),
             )
 
-            M = lattice_matrix(*lattice_tuple)
-            cart = shell_frac @ M.T
-            r_ij = np.sqrt(np.sum(cart * cart, axis=1))
+            M = lattice_matrix(
+                *lattice_tuple
+            )
+
+            cart = np.asarray(
+                self._shell_cartesian_vectors(
+                    M
+                ),
+                dtype=float,
+            )
+
+            r_ij = np.sqrt(
+                np.sum(
+                    cart
+                    * cart,
+                    axis=1,
+                )
+            )
 
             if max_r is None:
                 max_r = float(np.nanmax(r_ij)) if r_ij.size else 0.0
@@ -3448,7 +5480,15 @@ class PDFCalculator:
             float(lattice_dict["gamma"]),
         )
 
-        self.cell = Cell(*lattice_tuple)
+        if (
+            self._uses_fixed_stacked_geometry()
+            and self._stacking_cell is not None
+        ):
+            self.cell = self._stacking_cell
+        else:
+            self.cell = Cell(
+                *lattice_tuple
+            )
 
         refcfg = (self.config.get("refinement") or {}) if isinstance(self.config, dict) else {}
 
@@ -3486,7 +5526,9 @@ class PDFCalculator:
 
         # --- shell distances ---
         M = lattice_matrix(*lattice_tuple).astype(self._dtype, copy=False)
-        cart = self._shell_frac @ M.T
+        cart = self._shell_cartesian_vectors(
+            M
+        )
         r_ij = np.sqrt(np.sum(cart * cart, axis=1)).astype(float)
 
         # Limit Warren data by particle size or 5 Å fallback
@@ -3790,7 +5832,15 @@ class PDFCalculator:
         )
 
         # Keep cell consistent with refined lattice for direction cosines etc.
-        self.cell = Cell(*lattice_tuple)
+        if (
+            self._uses_fixed_stacked_geometry()
+            and self._stacking_cell is not None
+        ):
+            self.cell = self._stacking_cell
+        else:
+            self.cell = Cell(
+                *lattice_tuple
+            )
         _mark("lattice+cell")
         # shells are prepacked numeric arrays; no dicts in the hot path
 
@@ -3809,10 +5859,19 @@ class PDFCalculator:
                 f"lattice_tuple={lattice_tuple}"
             )
 
-        self.rho0 = num_atoms / vol
+        # Site occupancies (occ_<site> parameters) change shell
+        # multiplicities and composition; no-op when unchanged.
+        self._apply_occupancies(params)
 
-        # --- densities (number density per species) ---
-        densities_vec = self._counts.astype(float) / vol  # aligned to self._unique_species
+        # Fractional coordinates (x_/y_/z_<site>) of movable sites.
+        self._apply_coordinates(params)
+
+        (
+            self.rho0,
+            densities_vec,
+        ) = self._current_number_density_and_species_densities(
+            vol
+        )
 
         # Biso values aligned to self._unique_species.
         #
@@ -4187,6 +6246,9 @@ class PDFCalculator:
         use_cuda_pdf = (
             self._pdf_backend_active == "cuda"
             and self._cuda_pdf_backend is not None
+            and not self._uses_fixed_stacked_geometry()
+            # The CUDA width kernel has no anisotropic ADPs yet.
+            and getattr(self, "_adp", None) is None
         )
 
         need_cartesian_on_cpu = (
@@ -4219,10 +6281,28 @@ class PDFCalculator:
                 dtype=self._dtype,
             )
 
+        elif get_num_threads is not None:
+            # Parallel over shells (numba_kernels.shell_cart_and_distance).
+            if self._uses_fixed_stacked_geometry():
+                cart = np.ascontiguousarray(self._shell_cart_fixed, dtype=self._dtype)
+                r_ij = np.empty(cart.shape[0], dtype=self._dtype)
+                row_norms(cart, r_ij)
+            else:
+                frac_s = self._shell_frac
+                if frac_s.dtype != self._dtype or not frac_s.flags.c_contiguous:
+                    frac_s = np.ascontiguousarray(frac_s, dtype=self._dtype)
+                    self._shell_frac = frac_s
+                MT = np.ascontiguousarray(np.asarray(M, dtype=self._dtype).T)
+                cart = np.empty((frac_s.shape[0], 3), dtype=self._dtype)
+                r_ij = np.empty(frac_s.shape[0], dtype=self._dtype)
+                shell_cart_and_distance(frac_s, MT, cart, r_ij)
+
         else:
-            cart = (
-                self._shell_frac
-                @ M.T
+            cart = np.asarray(
+                self._shell_cartesian_vectors(
+                    M
+                ),
+                dtype=self._dtype,
             )
 
             r_ij = np.sqrt(
@@ -4343,75 +6423,96 @@ class PDFCalculator:
         except Exception:
             pass
         
-        # Apply per-pair lambdas if present
-        m_rem = np.ones(r_ij.shape[0], dtype=bool)
-        
-        if lam_mat is not None:
-            uid = self._shell_upair_id_i64
-            k_in = self._shell_k_within_upair_i64
-        
-            lam_val = np.full(r_ij.shape[0], np.nan, dtype=self._dtype)
-        
-            valid = k_in < lam_mat.shape[1]
-            if np.any(valid):
-                lam_val[valid] = lam_mat[uid[valid], k_in[valid]]
-        
-            m_pair = ~np.isnan(lam_val)
-        
-            if np.any(m_pair):
-                base_corr[m_pair] = self._dtype(1.0) - lam_val[m_pair]
-        
-            m_rem = ~m_pair
-        
-        # Remaining shells:
-        #   first try legacy global lambda_0/lambda_1 if available,
-        #   otherwise use pair-specific delta1/delta2 if present,
-        #   otherwise global delta1/delta2.
-        if np.any(m_rem):
-            k_rank = self._shell_k_rank_i64
-        
-            # First global lambda_k if present
-            if N_lambda > 0:
-                lam = np.asarray(lambda_vals, dtype=self._dtype)
-        
-                m_glob = m_rem & (k_rank < N_lambda)
-        
-                if np.any(m_glob):
-                    base_corr[m_glob] = self._dtype(1.0) - lam[k_rank[m_glob]]
-        
-                m_delta = m_rem & ~m_glob
+        if get_num_threads is not None:
+            # Parallel over shells (numba_kernels.shell_correlation), same rules.
+            if lam_mat is None:
+                lam_mat_k = np.zeros((len(self._upair_list), 0), dtype=self._dtype)
             else:
-                m_delta = m_rem
+                lam_mat_k = np.ascontiguousarray(lam_mat, dtype=self._dtype)
+            corr = np.empty_like(r_ij, dtype=self._dtype)
+            shell_correlation(
+                r_ij,
+                self._shell_upair_id_i64,
+                self._shell_k_within_upair_i64,
+                self._shell_k_rank_i64,
+                lam_mat_k,
+                np.asarray(lambda_vals, dtype=self._dtype).reshape(-1),
+                np.ascontiguousarray(pair_delta1, dtype=self._dtype),
+                np.ascontiguousarray(pair_delta2, dtype=self._dtype),
+                self._dtype(delta1_global),
+                self._dtype(delta2_global),
+                corr,
+            )
+        else:
+            # Apply per-pair lambdas if present
+            m_rem = np.ones(r_ij.shape[0], dtype=bool)
         
-            if np.any(m_delta):
-                uid = self._shell_upair_id_i64[m_delta]
-                rm = r_ij[m_delta]
+            if lam_mat is not None:
+                uid = self._shell_upair_id_i64
+                k_in = self._shell_k_within_upair_i64
         
-                d1_use = np.full(rm.shape, self._dtype(delta1_global), dtype=self._dtype)
-                d2_use = np.full(rm.shape, self._dtype(delta2_global), dtype=self._dtype)
+                lam_val = np.full(r_ij.shape[0], np.nan, dtype=self._dtype)
         
-                # Override with pair-specific values where present
-                d1_pair = pair_delta1[uid]
-                d2_pair = pair_delta2[uid]
+                valid = k_in < lam_mat.shape[1]
+                if np.any(valid):
+                    lam_val[valid] = lam_mat[uid[valid], k_in[valid]]
         
-                m_d1 = ~np.isnan(d1_pair)
-                m_d2 = ~np.isnan(d2_pair)
+                m_pair = ~np.isnan(lam_val)
         
-                if np.any(m_d1):
-                    d1_use[m_d1] = d1_pair[m_d1]
-                if np.any(m_d2):
-                    d2_use[m_d2] = d2_pair[m_d2]
+                if np.any(m_pair):
+                    base_corr[m_pair] = self._dtype(1.0) - lam_val[m_pair]
         
-                base_corr[m_delta] = (
-                    self._dtype(1.0)
-                    - d1_use / np.maximum(rm, self._dtype(1e-12))
-                    - d2_use / np.maximum(rm * rm, self._dtype(1e-24))
-                )
+                m_rem = ~m_pair
+        
+            # Remaining shells:
+            #   first try legacy global lambda_0/lambda_1 if available,
+            #   otherwise use pair-specific delta1/delta2 if present,
+            #   otherwise global delta1/delta2.
+            if np.any(m_rem):
+                k_rank = self._shell_k_rank_i64
+        
+                # First global lambda_k if present
+                if N_lambda > 0:
+                    lam = np.asarray(lambda_vals, dtype=self._dtype)
+        
+                    m_glob = m_rem & (k_rank < N_lambda)
+        
+                    if np.any(m_glob):
+                        base_corr[m_glob] = self._dtype(1.0) - lam[k_rank[m_glob]]
+        
+                    m_delta = m_rem & ~m_glob
+                else:
+                    m_delta = m_rem
+        
+                if np.any(m_delta):
+                    uid = self._shell_upair_id_i64[m_delta]
+                    rm = r_ij[m_delta]
+        
+                    d1_use = np.full(rm.shape, self._dtype(delta1_global), dtype=self._dtype)
+                    d2_use = np.full(rm.shape, self._dtype(delta2_global), dtype=self._dtype)
+        
+                    # Override with pair-specific values where present
+                    d1_pair = pair_delta1[uid]
+                    d2_pair = pair_delta2[uid]
+        
+                    m_d1 = ~np.isnan(d1_pair)
+                    m_d2 = ~np.isnan(d2_pair)
+        
+                    if np.any(m_d1):
+                        d1_use[m_d1] = d1_pair[m_d1]
+                    if np.any(m_d2):
+                        d2_use[m_d2] = d2_pair[m_d2]
+        
+                    base_corr[m_delta] = (
+                        self._dtype(1.0)
+                        - d1_use / np.maximum(rm, self._dtype(1e-12))
+                        - d2_use / np.maximum(rm * rm, self._dtype(1e-24))
+                    )
 
-        corr = np.maximum(base_corr, self._dtype(0.0))
+            corr = np.maximum(base_corr, self._dtype(0.0))
         _mark("lambda+delta_corr")                
         # --- Biso average per shell (vectorized) ---
-        biso_avg = (self._dtype(0.5) * (biso_vals_vec[self._shell_alpha_id] + biso_vals_vec[self._shell_beta_id])).astype(self._dtype, copy=False)
+        biso_avg = None if get_num_threads is not None else (self._dtype(0.5) * (biso_vals_vec[self._shell_alpha_id] + biso_vals_vec[self._shell_beta_id])).astype(self._dtype, copy=False)
 
             # --- Wilkens microstrain term (vectorized by unique hkl) ---
             # --- Wilkens microstrain term (vectorized by unique crystallographic direction) ---
@@ -4607,129 +6708,166 @@ class PDFCalculator:
                     ),
                 )
 
-                strainINV = Chkl_u[
-                    inv_dirs
-                ].astype(
-                    self._dtype,
-                    copy=False,
-                )
-
-                if wilkens_active:
-                    params_lc = self._params_lc(
-                        params
-                    )
-
-                    bmag = self._pfloat(
-                        params_lc,
-                        (
-                            "burgers_mag",
-                            "burgers",
-                            "b_mag",
-                            "b",
-                        ),
-                        0.0,
-                    )
-
-                    if bmag <= 0.0:
-                        bmag = (
-                            np.sqrt(3.0)
-                            / 2.0
-                            * float(
-                                lattice_tuple[0]
-                            )
-                        )
-
-                    fstar_vals = fstar_vec(
-                        r_ij.astype(
-                            float
-                        ),
-                        Re,
-                    ).astype(
+                if get_num_threads is not None:
+                    # Parallel over shells (numba_kernels), same expressions.
+                    chk_u = np.ascontiguousarray(Chkl_u, dtype=self._dtype)
+                    inv_u = np.ascontiguousarray(inv_dirs)
+                    strain_L2 = np.empty_like(r_ij, dtype=self._dtype)
+                    if wilkens_active:
+                        bmag = self._pfloat(self._params_lc(params), ("burgers_mag", "burgers", "b_mag", "b"), 0.0)
+                        if bmag <= 0.0:
+                            bmag = np.sqrt(3.0) / 2.0 * float(lattice_tuple[0])
+                        wilkens_strain_L2(r_ij, chk_u, inv_u, self._dtype(Re),
+                                          self._dtype(float(rho) * float(bmag) ** 2 / (4.0 * np.pi)), strain_L2)
+                    else:
+                        pah_strain_L2(r_ij, chk_u, inv_u, self._dtype(pah_a), self._dtype(pah_b), strain_L2)
+                else:
+                    strainINV = Chkl_u[
+                        inv_dirs
+                    ].astype(
                         self._dtype,
                         copy=False,
                     )
 
-                    eps2 = (
-                        self._dtype(
-                            rho
+                    if wilkens_active:
+                        params_lc = self._params_lc(
+                            params
                         )
-                        * (
-                            self._dtype(
-                                bmag
+
+                        bmag = self._pfloat(
+                            params_lc,
+                            (
+                                "burgers_mag",
+                                "burgers",
+                                "b_mag",
+                                "b",
+                            ),
+                            0.0,
+                        )
+
+                        if bmag <= 0.0:
+                            bmag = (
+                                np.sqrt(3.0)
+                                / 2.0
+                                * float(
+                                    lattice_tuple[0]
+                                )
                             )
-                            ** 2
-                        )
-                        / self._dtype(
-                            4.0
-                            * np.pi
-                        )
-                    ) * strainINV * fstar_vals
 
-                    strain_L2 = (
-                        r_ij
-                        * r_ij
-                    ) * eps2
-
-                elif pah_active:
-                    strain_L2 = strainINV * (
-                        self._dtype(
-                            pah_a
+                        fstar_vals = fstar_vec(
+                            r_ij.astype(
+                                float
+                            ),
+                            Re,
+                        ).astype(
+                            self._dtype,
+                            copy=False,
                         )
-                        * r_ij
-                        + self._dtype(
-                            pah_b
-                        )
-                        * r_ij
-                        * r_ij
-                    )
 
-                    strain_L2 = np.maximum(
-                        strain_L2,
-                        self._dtype(
-                            0.0
-                        ),
-                    )
+                        eps2 = (
+                            self._dtype(
+                                rho
+                            )
+                            * (
+                                self._dtype(
+                                    bmag
+                                )
+                                ** 2
+                            )
+                            / self._dtype(
+                                4.0
+                                * np.pi
+                            )
+                        ) * strainINV * fstar_vals
+
+                        strain_L2 = (
+                            r_ij
+                            * r_ij
+                        ) * eps2
+
+                    elif pah_active:
+                        strain_L2 = strainINV * (
+                            self._dtype(
+                                pah_a
+                            )
+                            * r_ij
+                            + self._dtype(
+                                pah_b
+                            )
+                            * r_ij
+                            * r_ij
+                        )
+
+                        strain_L2 = np.maximum(
+                            strain_L2,
+                            self._dtype(
+                                0.0
+                            ),
+                        )
 
             _mark(
                 "wilkens_strain"
             )
 
-            sigma2 = (
-                self._dtype(
-                    1.0
-                    / (
-                        4.0
-                        * np.pi ** 2
+            if get_num_threads is not None:
+                sigma = np.empty_like(r_ij, dtype=self._dtype)
+                if getattr(self, "_adp", None) is not None:
+                    Mf = np.asarray(M, dtype=np.float64)
+                    shell_sigma_adp(
+                        r_ij, corr, np.ascontiguousarray(biso_vals_vec, dtype=self._dtype),
+                        self._shell_alpha_id, self._shell_beta_id,
+                        np.ascontiguousarray(strain_L2, dtype=self._dtype),
+                        self._dtype(1.0 / (4.0 * np.pi ** 2)), self._dtype(delta_g), self._dtype(delta_broad),
+                        np.ascontiguousarray(self._shell_frac, dtype=np.float64),
+                        np.ascontiguousarray(Mf.T @ Mf),
+                        self._adp["center"], self._adp["neighbor"], self._adp["rot"],
+                        np.ascontiguousarray(self._adp_entry_betas(params)), sigma,
                     )
+                else:
+                    shell_sigma(
+                        r_ij, corr, np.ascontiguousarray(biso_vals_vec, dtype=self._dtype),
+                        self._shell_alpha_id, self._shell_beta_id,
+                        np.ascontiguousarray(strain_L2, dtype=self._dtype),
+                        self._dtype(1.0 / (4.0 * np.pi ** 2)), self._dtype(delta_g), self._dtype(delta_broad), sigma,
+                    )
+            else:
+                biso_avg = (self._dtype(0.5) * (biso_vals_vec[self._shell_alpha_id] + biso_vals_vec[self._shell_beta_id])).astype(self._dtype, copy=False)
+                sigma2 = (
+                    self._dtype(
+                        1.0
+                        / (
+                            4.0
+                            * np.pi ** 2
+                        )
+                    )
+                    * biso_avg
+                    * corr
+                    + (
+                        self._dtype(
+                            delta_g
+                        )
+                        * r_ij
+                    ) ** 2
+                    + (
+                        self._dtype(
+                            delta_broad
+                        )
+                        * r_ij
+                    ) ** 2
+                    + strain_L2
                 )
-                * biso_avg
-                * corr
-                + (
-                    self._dtype(
-                        delta_g
-                    )
-                    * r_ij
-                ) ** 2
-                + (
-                    self._dtype(
-                        delta_broad
-                    )
-                    * r_ij
-                ) ** 2
-                + strain_L2
-            )
 
-            sigma = np.sqrt(
-                np.maximum(
-                    sigma2,
-                    self._dtype(
-                        1.0e-24
-                    ),
+                sigma = np.sqrt(
+                    np.maximum(
+                        sigma2,
+                        self._dtype(
+                            1.0e-24
+                        ),
+                    )
+                ).astype(
+                    self._dtype,
+                    copy=False,
                 )
-            ).astype(
-                self._dtype,
-                copy=False,
-            )
 
             _mark(
                 "sigma"
@@ -4787,6 +6925,26 @@ class PDFCalculator:
                         dtype=self._dtype,
                     )
                 )
+
+            # Free-peak analysis hooks (CPU path only):
+            #   _peak_capture  True  -> store r_ij, sigma, A_ij of every shell
+            #   _peak_override dict  -> {"index", "sigma", "amp_scale"}
+            #                           replace sigma / scale A_ij of shells
+            if getattr(self, "_peak_capture", False):
+                self._peak_captured = {
+                    "r_ij": np.asarray(r_ij, dtype=float).copy(),
+                    "sigma": np.asarray(sigma, dtype=float).copy(),
+                    "A_ij": np.asarray(A_ij, dtype=float).copy(),
+                }
+            override = getattr(self, "_peak_override", None)
+            if override is not None:
+                idx = override["index"]
+                if override.get("sigma") is not None:
+                    sigma = np.array(sigma, copy=True)
+                    sigma[idx] = np.asarray(override["sigma"], dtype=self._dtype)
+                if override.get("amp_scale") is not None:
+                    A_ij = np.array(A_ij, copy=True)
+                    A_ij[idx] = A_ij[idx] * np.asarray(override["amp_scale"], dtype=self._dtype)
 
             g_by_pair = np.zeros(
                 (
@@ -4947,6 +7105,27 @@ class PDFCalculator:
                 * r32
                 * gamma_r
                 * g_weighted
+            )
+
+        # Free-peak analysis: the map g_weighted -> G_peak is linear,
+        #   G_peak = Interp( Termination( mult(r) * g_weighted ) ),
+        # with mult = scale*4πρ0*r*(γ_r)*damp(r). Recorded so that the
+        # free-peak fit can build its Jacobian without re-evaluating.
+        if getattr(self, "_peak_capture", False) and isinstance(getattr(self, "_peak_captured", None), dict):
+            if shape_mode == "finite_shape" or cylinder_shell_gamma is not None:
+                lin_mult = float(scale) * float(norm) * np.asarray(r32, dtype=float)
+            else:
+                lin_mult = float(scale) * float(norm) * np.asarray(r32, dtype=float) * np.asarray(gamma_r, dtype=float)
+            if qdamp > 0.0:
+                lin_mult = lin_mult * np.exp(-0.5 * float(qdamp) ** 2 * np.asarray(r32, dtype=float) ** 2)
+            self._peak_captured.update(
+                lin_r=np.asarray(r32, dtype=float).copy(),
+                lin_mult=lin_mult,
+                lin_w_pair=np.asarray(self._w_ordered, dtype=float).copy(),
+                lin_qmax=float(qmax),
+                lin_qmax_zeros=int(qmax_zeros),
+                lin_internal=bool(use_internal_qmax_grid),
+                lin_r_out=np.asarray(r_requested, dtype=float).copy(),
             )
 
         gamma_base = np.asarray(

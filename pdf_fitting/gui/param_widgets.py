@@ -347,8 +347,33 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
 
     changed = QtCore.Signal()
 
+    # Emitted as (row element, kind) when the user toggles a refinement
+    # checkbox; kind is "occ" (Rocc) or "xyz" (Rx/Ry/Rz).
+    refineFlagToggled = QtCore.Signal(str, str)
+
+    COL_EL = 2
+    COL_OCC = 9
+    COL_ROCC = 10
+    COL_OCC_MIN = 11
+    COL_OCC_MAX = 12
+    COL_BISO = 13
+    COL_BISO_MIN = 14
+    COL_BISO_MAX = 15
+    COL_BISO_USE = 16
+    COL_BISO_REF = 17
+    BISO_COLUMNS = (13, 14, 15, 16, 17)
+
+    COL_RX = 4
+    COL_RY = 6
+    COL_RZ = 8
+
+    REFINE_COLUMNS = {
+        "occ": (10,),
+        "xyz": (4, 6, 8),
+    }
+
     def __init__(self, parent=None):
-        super().__init__(0, 16, parent)
+        super().__init__(0, 18, parent)
         self._block = False
 
         self.setHorizontalHeaderLabels([
@@ -363,6 +388,8 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
             "Rz",
             "occ",
             "Rocc",
+            "Occ Min",
+            "Occ Max",
             "Biso",
             "Biso Min",
             "Biso Max",
@@ -372,18 +399,43 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
 
         hdr = self.horizontalHeader()
         hdr.setStretchLastSection(False)
+        hdr.setMinimumSectionSize(35)
 
-        # Compact columns by default.
-        for c in range(self.columnCount()):
-            hdr.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
+        for column in range(self.columnCount()):
+            hdr.setSectionResizeMode(
+                column,
+                QtWidgets.QHeaderView.Interactive,
+            )
 
-        # Keep Label compact.
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.setColumnWidth(0, 42)
+        self.setColumnWidth(1, 90)
+        self.setColumnWidth(2, 45)
 
-        # Let Biso column absorb extra horizontal space instead of leaving a blank area.
-        # This keeps the label compact but makes the table occupy the available width.
-        hdr.setSectionResizeMode(11, QtWidgets.QHeaderView.Stretch)
+        self.setColumnWidth(3, 95)
+        self.setColumnWidth(4, 42)
 
+        self.setColumnWidth(5, 95)
+        self.setColumnWidth(6, 42)
+
+        self.setColumnWidth(7, 95)
+        self.setColumnWidth(8, 42)
+
+        self.setColumnWidth(9, 75)
+        self.setColumnWidth(10, 50)
+
+        self.setColumnWidth(self.COL_OCC_MIN, 65)
+        self.setColumnWidth(self.COL_OCC_MAX, 65)
+
+        self.setColumnWidth(self.COL_BISO, 90)
+        self.setColumnWidth(self.COL_BISO_MIN, 75)
+        self.setColumnWidth(self.COL_BISO_MAX, 75)
+        self.setColumnWidth(self.COL_BISO_USE, 70)
+        self.setColumnWidth(self.COL_BISO_REF, 55)
+
+        hdr.setSectionResizeMode(
+            1,
+            QtWidgets.QHeaderView.Stretch,
+        )
         # Make the whole widget use available space.
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
@@ -401,9 +453,48 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
             "Use Biso? controls whether this site Biso is written to the input."
         )
 
-    def _on_item_changed(self, _item):
-        if not self._block:
-            self.changed.emit()
+    def _on_item_changed(self, item):
+        if self._block:
+            return
+
+        if item is not None:
+            for kind, columns in self.REFINE_COLUMNS.items():
+                if item.column() not in columns:
+                    continue
+
+                el_item = self.item(item.row(), self.COL_EL)
+
+                if el_item is not None:
+                    self.refineFlagToggled.emit(
+                        str(el_item.text()).strip(),
+                        kind,
+                    )
+
+        self.changed.emit()
+
+    @staticmethod
+    def _split_bounds(value) -> Tuple[str, str]:
+        """(lo, hi) tuple/list or "lo, hi" string -> ("lo", "hi") text."""
+        if value is None:
+            return "", ""
+
+        try:
+            if isinstance(value, (tuple, list)) and len(value) >= 2:
+                lo, hi = value[0], value[1]
+            else:
+                parts = [p.strip() for p in str(value).split(",", 1)]
+
+                if len(parts) != 2:
+                    return "", ""
+
+                lo, hi = parts
+
+            lo = "" if lo in (None, "") else str(lo)
+            hi = "" if hi in (None, "") else str(hi)
+            return lo, hi
+
+        except Exception:
+            return "", ""
 
     @staticmethod
     def _safe_key(label: str) -> str:
@@ -428,147 +519,461 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
     ) -> None:
         initial = initial or {}
         refinable = refinable or {}
-        use_flags = use_flags or {}
         bounds = bounds or {}
-        
-        if not sites:
-            self._block = True
-            try:
-                self.setRowCount(0)
-            finally:
-                self._block = False
+        use_flags = use_flags or {}
 
-            return
-        
+        sites = list(
+            sites
+            or []
+        )
+
+        old_sorting_enabled = self.isSortingEnabled()
+
         self._block = True
+        self.blockSignals(True)
+        self.setUpdatesEnabled(False)
+        self.setSortingEnabled(False)
+
         try:
-            self.setRowCount(len(sites or []))
+            self.clearContents()
+            self.setRowCount(
+                len(sites)
+            )
 
-            for row, rec in enumerate(sites or []):
-                label = str(rec.get("label", f"site{row + 1}")).strip()
-                el = str(rec.get("el", "")).strip()
+            enabled_selectable_flags = (
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+            )
 
-                x, y, z = rec.get("frac", (0.0, 0.0, 0.0))
-                occ = rec.get("occ", 1.0)
-                biso = rec.get("biso", "")
+            editable_flags = (
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+                | Qt.ItemIsEditable
+            )
 
-                key = self._safe_key(label)
+            checkbox_flags = (
+                Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+                | Qt.ItemIsUserCheckable
+            )
 
-                keys = {
-                    "x": f"x_{key}",
-                    "y": f"y_{key}",
-                    "z": f"z_{key}",
-                    "occ": f"occ_{key}",
-                    "biso": f"biso_{key}",
-                }
+            def make_text_item(
+                value,
+                *,
+                editable: bool,
+                parameter_key: str | None = None,
+                tooltip: str = "",
+            ):
+                item = QtWidgets.QTableWidgetItem(
+                    ""
+                    if value is None
+                    else str(value)
+                )
 
-                values = {
-                    "x": initial.get(keys["x"], x),
-                    "y": initial.get(keys["y"], y),
-                    "z": initial.get(keys["z"], z),
-                    "occ": initial.get(keys["occ"], occ),
-                    "biso": initial.get(keys["biso"], biso),
-                }
+                item.setFlags(
+                    editable_flags
+                    if editable
+                    else enabled_selectable_flags
+                )
 
-                def item(text, editable=True):
-                    it = QtWidgets.QTableWidgetItem("" if text is None else str(text))
-                    flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-                    if editable:
-                        flags |= Qt.ItemIsEditable
-                    it.setFlags(flags)
-                    return it
+                if parameter_key:
+                    item.setData(
+                        Qt.UserRole,
+                        str(parameter_key),
+                    )
 
-                def chk(param_key, default=False):
-                    it = QtWidgets.QTableWidgetItem("")
-                    it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                    it.setCheckState(Qt.Checked if bool(refinable.get(param_key, default)) else Qt.Unchecked)
-                    return it
+                if tooltip:
+                    item.setToolTip(
+                        tooltip
+                    )
 
-                def use_chk(param_key, default=True):
-                    it = QtWidgets.QTableWidgetItem("")
-                    it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                    it.setCheckState(Qt.Checked if bool(use_flags.get(param_key, default)) else Qt.Unchecked)
-                    return it
+                return item
 
-                # #
-                self.setItem(row, 0, item(row, editable=False))
+            def make_checkbox_item(
+                checked: bool,
+                *,
+                tooltip: str = "",
+            ):
+                item = QtWidgets.QTableWidgetItem("")
+                item.setFlags(
+                    checkbox_flags
+                )
 
-                # Label
-                it_label = item(label, editable=False)
-                it_label.setData(Qt.UserRole, key)
-                self.setItem(row, 1, it_label)
+                item.setCheckState(
+                    Qt.Checked
+                    if bool(checked)
+                    else Qt.Unchecked
+                )
 
-                # Element
-                self.setItem(row, 2, item(el, editable=False))
+                if tooltip:
+                    item.setToolTip(
+                        tooltip
+                    )
 
-                # x/Rx
-                it_x = item(values["x"], editable=True)
-                it_x.setData(Qt.UserRole, keys["x"])
-                self.setItem(row, 3, it_x)
-                self.setItem(row, 4, chk(keys["x"]))
+                return item
 
-                # y/Ry
-                it_y = item(values["y"], editable=True)
-                it_y.setData(Qt.UserRole, keys["y"])
-                self.setItem(row, 5, it_y)
-                self.setItem(row, 6, chk(keys["y"]))
+            for row, record in enumerate(sites):
+                label = str(
+                    record.get(
+                        "label",
+                        f"site{row + 1}",
+                    )
+                    or f"site{row + 1}"
+                ).strip()
 
-                # z/Rz
-                it_z = item(values["z"], editable=True)
-                it_z.setData(Qt.UserRole, keys["z"])
-                self.setItem(row, 7, it_z)
-                self.setItem(row, 8, chk(keys["z"]))
+                element = str(
+                    record.get(
+                        "el",
+                        "",
+                    )
+                    or ""
+                ).strip()
 
-                # occ/Rocc
-                it_occ = item(values["occ"], editable=True)
-                it_occ.setData(Qt.UserRole, keys["occ"])
-                self.setItem(row, 9, it_occ)
-                self.setItem(row, 10, chk(keys["occ"]))
+                fractional = record.get(
+                    "frac",
+                    (
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
+                )
 
-                # Biso / Biso Min / Biso Max / Use Biso / Rbiso
-                it_biso = item(values["biso"], editable=True)
-                it_biso.setData(Qt.UserRole, keys["biso"])
-                self.setItem(row, 11, it_biso)
+                try:
+                    x_value = fractional[0]
+                    y_value = fractional[1]
+                    z_value = fractional[2]
 
-                # Bounds for Biso.
-                # Default Biso bounds are physically conservative:
-                #   0 <= Biso <= 10 Å²
-                # User can edit these in the GUI.
-                biso_lo, biso_hi = "0", "10"
-                
-                if keys["biso"] in bounds:
-                    bv = bounds.get(keys["biso"])
-                
+                except Exception:
+                    x_value = 0.0
+                    y_value = 0.0
+                    z_value = 0.0
+
+                occupancy_value = record.get(
+                    "occ",
+                    1.0,
+                )
+
+                biso_value = record.get(
+                    "biso",
+                    "",
+                )
+
+                safe_label = self._safe_key(
+                    label
+                )
+
+                x_key = f"x_{safe_label}"
+                y_key = f"y_{safe_label}"
+                z_key = f"z_{safe_label}"
+                occupancy_key = f"occ_{safe_label}"
+                biso_key = f"biso_{safe_label}"
+
+                x_value = initial.get(
+                    x_key,
+                    x_value,
+                )
+
+                y_value = initial.get(
+                    y_key,
+                    y_value,
+                )
+
+                z_value = initial.get(
+                    z_key,
+                    z_value,
+                )
+
+                occupancy_value = initial.get(
+                    occupancy_key,
+                    occupancy_value,
+                )
+
+                biso_value = initial.get(
+                    biso_key,
+                    biso_value,
+                )
+
+                self.setItem(
+                    row,
+                    0,
+                    make_text_item(
+                        row,
+                        editable=False,
+                    ),
+                )
+
+                label_item = make_text_item(
+                    label,
+                    editable=False,
+                )
+
+                label_item.setData(
+                    Qt.UserRole,
+                    safe_label,
+                )
+
+                self.setItem(
+                    row,
+                    1,
+                    label_item,
+                )
+
+                self.setItem(
+                    row,
+                    2,
+                    make_text_item(
+                        element,
+                        editable=False,
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    3,
+                    make_text_item(
+                        x_value,
+                        editable=True,
+                        parameter_key=x_key,
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    4,
+                    make_checkbox_item(
+                        refinable.get(
+                            x_key,
+                            False,
+                        ),
+                        tooltip="Refine this x coordinate.",
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    5,
+                    make_text_item(
+                        y_value,
+                        editable=True,
+                        parameter_key=y_key,
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    6,
+                    make_checkbox_item(
+                        refinable.get(
+                            y_key,
+                            False,
+                        ),
+                        tooltip="Refine this y coordinate.",
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    7,
+                    make_text_item(
+                        z_value,
+                        editable=True,
+                        parameter_key=z_key,
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    8,
+                    make_checkbox_item(
+                        refinable.get(
+                            z_key,
+                            False,
+                        ),
+                        tooltip="Refine this z coordinate.",
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    9,
+                    make_text_item(
+                        occupancy_value,
+                        editable=True,
+                        parameter_key=occupancy_key,
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    10,
+                    make_checkbox_item(
+                        refinable.get(
+                            occupancy_key,
+                            False,
+                        ),
+                        tooltip="Refine this occupancy.",
+                    ),
+                )
+
+                occ_minimum, occ_maximum = self._split_bounds(
+                    bounds.get(occupancy_key)
+                )
+
+                self.setItem(
+                    row,
+                    self.COL_OCC_MIN,
+                    make_text_item(
+                        occ_minimum,
+                        editable=True,
+                        tooltip=(
+                            "Lower occupancy limit for this site. "
+                            "Blank: use the global occupancy limits."
+                        ),
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    self.COL_OCC_MAX,
+                    make_text_item(
+                        occ_maximum,
+                        editable=True,
+                        tooltip=(
+                            "Upper occupancy limit for this site. "
+                            "Blank: use the global occupancy limits."
+                        ),
+                    ),
+                )
+
+                biso_minimum = "0"
+                biso_maximum = "10"
+
+                if biso_key in bounds:
+                    bound_value = bounds.get(
+                        biso_key
+                    )
+
                     try:
-                        if isinstance(bv, (tuple, list)) and len(bv) >= 2:
-                            if bv[0] not in (None, ""):
-                                biso_lo = str(bv[0])
-                            if bv[1] not in (None, ""):
-                                biso_hi = str(bv[1])
+                        if (
+                            isinstance(
+                                bound_value,
+                                (
+                                    tuple,
+                                    list,
+                                ),
+                            )
+                            and len(bound_value) >= 2
+                        ):
+                            lower_value = bound_value[0]
+                            upper_value = bound_value[1]
+
+                            if lower_value not in (
+                                None,
+                                "",
+                            ):
+                                biso_minimum = str(
+                                    lower_value
+                                )
+
+                            if upper_value not in (
+                                None,
+                                "",
+                            ):
+                                biso_maximum = str(
+                                    upper_value
+                                )
+
                         else:
-                            parts = [x.strip() for x in str(bv).split(",", 1)]
+                            parts = [
+                                part.strip()
+                                for part in str(
+                                    bound_value
+                                ).split(
+                                    ",",
+                                    1,
+                                )
+                            ]
+
                             if len(parts) == 2:
-                                if parts[0] != "":
-                                    biso_lo = parts[0]
-                                if parts[1] != "":
-                                    biso_hi = parts[1]
+                                if parts[0]:
+                                    biso_minimum = parts[0]
+
+                                if parts[1]:
+                                    biso_maximum = parts[1]
+
                     except Exception:
-                        biso_lo, biso_hi = "0", "10"
+                        biso_minimum = "0"
+                        biso_maximum = "10"
 
-                it_biso_lo = item(biso_lo, editable=True)
-                it_biso_lo.setToolTip("Lower bound for this site Biso.")
-                self.setItem(row, 12, it_biso_lo)
+                self.setItem(
+                    row,
+                    self.COL_BISO,
+                    make_text_item(
+                        biso_value,
+                        editable=True,
+                        parameter_key=biso_key,
+                    ),
+                )
 
-                it_biso_hi = item(biso_hi, editable=True)
-                it_biso_hi.setToolTip("Upper bound for this site Biso.")
-                self.setItem(row, 13, it_biso_hi)
+                self.setItem(
+                    row,
+                    self.COL_BISO_MIN,
+                    make_text_item(
+                        biso_minimum,
+                        editable=True,
+                        tooltip="Lower bound for this site Biso.",
+                    ),
+                )
 
-                self.setItem(row, 14, use_chk(keys["biso"], default=True))
-                self.setItem(row, 15, chk(keys["biso"]))
+                self.setItem(
+                    row,
+                    self.COL_BISO_MAX,
+                    make_text_item(
+                        biso_maximum,
+                        editable=True,
+                        tooltip="Upper bound for this site Biso.",
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    self.COL_BISO_USE,
+                    make_checkbox_item(
+                        use_flags.get(
+                            biso_key,
+                            True,
+                        ),
+                        tooltip=(
+                            "Include this site Biso parameter "
+                            "in the input."
+                        ),
+                    ),
+                )
+
+                self.setItem(
+                    row,
+                    self.COL_BISO_REF,
+                    make_checkbox_item(
+                        refinable.get(
+                            biso_key,
+                            False,
+                        ),
+                        tooltip="Refine this site Biso.",
+                    ),
+                )
 
         finally:
+            self.setSortingEnabled(
+                old_sorting_enabled
+            )
+
+            self.blockSignals(False)
+            self.setUpdatesEnabled(True)
             self._block = False
 
+            self.viewport().update()
+
+            
     def extract_all(self) -> Tuple[Dict[str, Any], Dict[str, bool], Dict[str, str], Dict[str, bool]]:
         initial_out: Dict[str, Any] = {}
         refinable_out: Dict[str, bool] = {}
@@ -608,13 +1013,22 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
                 )
                 use_out[key] = True
 
+                if value_col == self.COL_OCC:
+                    lo_item = self.item(row, self.COL_OCC_MIN)
+                    hi_item = self.item(row, self.COL_OCC_MAX)
+                    lo_txt = lo_item.text().strip() if lo_item is not None else ""
+                    hi_txt = hi_item.text().strip() if hi_item is not None else ""
+
+                    if lo_txt != "" or hi_txt != "":
+                        bounds_out[key] = f"{lo_txt}, {hi_txt}"
+
             # Biso has bounds, Use?, and Refine?.
-            key, txt = _value_key(row, 11)
+            key, txt = _value_key(row, self.COL_BISO)
             if key:
-                lo_item = self.item(row, 12)
-                hi_item = self.item(row, 13)
-                chk_use = self.item(row, 14)
-                chk_ref = self.item(row, 15)
+                lo_item = self.item(row, self.COL_BISO_MIN)
+                hi_item = self.item(row, self.COL_BISO_MAX)
+                chk_use = self.item(row, self.COL_BISO_USE)
+                chk_ref = self.item(row, self.COL_BISO_REF)
 
                 lo_txt = lo_item.text().strip() if lo_item is not None else ""
                 hi_txt = hi_item.text().strip() if hi_item is not None else ""
@@ -635,6 +1049,75 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
 
         return initial_out, refinable_out, bounds_out, use_out
 
+    def set_refine_flags_for_element(
+        self,
+        element: str,
+        checked: bool,
+        kind: str = "occ",
+    ) -> int:
+        """
+        Set the refine flags of ``kind`` ("occ": Rocc, "xyz": Rx/Ry/Rz) on
+        every row whose element matches. Returns the number of checkboxes
+        changed. Emits ``changed`` once.
+        """
+        target = str(element).strip().lower()
+        state = Qt.Checked if bool(checked) else Qt.Unchecked
+        columns = self.REFINE_COLUMNS.get(kind, ())
+        n_changed = 0
+
+        self._block = True
+
+        try:
+            for row in range(self.rowCount()):
+                el_item = self.item(row, self.COL_EL)
+
+                if el_item is None:
+                    continue
+
+                if str(el_item.text()).strip().lower() != target:
+                    continue
+
+                for col in columns:
+                    chk = self.item(row, col)
+
+                    if chk is None or chk.checkState() == state:
+                        continue
+
+                    chk.setCheckState(state)
+                    n_changed += 1
+
+        finally:
+            self._block = False
+
+        if n_changed:
+            self.changed.emit()
+
+        return n_changed
+
+    def element_refine_state(self, element: str, kind: str = "occ"):
+        """
+        True if every ``kind`` flag of every row of ``element`` is checked,
+        False if not, None if the element has no rows.
+        """
+        target = str(element).strip().lower()
+        columns = self.REFINE_COLUMNS.get(kind, ())
+        flags = []
+
+        for row in range(self.rowCount()):
+            el_item = self.item(row, self.COL_EL)
+
+            if el_item is None or str(el_item.text()).strip().lower() != target:
+                continue
+
+            for col in columns:
+                chk = self.item(row, col)
+                flags.append(chk is not None and chk.checkState() == Qt.Checked)
+
+        if not flags:
+            return None
+
+        return all(flags)
+
     def set_biso_controls_enabled(self, enabled: bool) -> None:
         """
         Enable/disable site-specific Biso editing/refinement columns.
@@ -649,7 +1132,7 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
         enabled = bool(enabled)
     
         for row in range(self.rowCount()):
-            for col in (11, 12, 13, 14, 15):
+            for col in self.BISO_COLUMNS:
                 it = self.item(row, col)
                 if it is None:
                     continue
@@ -659,7 +1142,7 @@ class SiteParamTableWidget(QtWidgets.QTableWidget):
                 if enabled:
                     flags |= Qt.ItemIsEnabled
     
-                    if col in (11, 12, 13):
+                    if col in (self.COL_BISO, self.COL_BISO_MIN, self.COL_BISO_MAX):
                         flags |= Qt.ItemIsEditable
                 else:
                     flags &= ~Qt.ItemIsEnabled
@@ -720,15 +1203,24 @@ class LambdaListWidget(QtWidgets.QWidget):
 
         btn_add = QtWidgets.QPushButton("Add λ")
         btn_del = QtWidgets.QPushButton("Remove selected")
+        btn_save = QtWidgets.QPushButton("Save λ .txt")
+
+        btn_add.setToolTip("Add a lambda coefficient for the selected pair.")
+        btn_del.setToolTip("Remove selected lambda coefficient rows.")
+        btn_save.setToolTip(
+            "Save all lambda coefficients for all pair types as a tab-separated text file."
+        )
 
         btn_add.clicked.connect(self.add_lambda)
         btn_del.clicked.connect(self.remove_selected)
+        btn_save.clicked.connect(self.save_lambdas_txt)
 
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("Pair:"))
         top.addWidget(self.combo_pair, 1)
         top.addWidget(btn_add)
         top.addWidget(btn_del)
+        top.addWidget(btn_save)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -897,6 +1389,103 @@ class LambdaListWidget(QtWidgets.QWidget):
         self._rebuild_table_for_current_pair()
         self.changed.emit()
 
+    def save_lambdas_txt(self) -> None:
+        """
+        Save all lambda coefficients for all pair types as a tab-separated file.
+        """
+        try:
+            # Store any edits currently visible in the table before exporting.
+            self._commit_current_table()
+
+            if not self._data:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "No lambda coefficients",
+                    "There are no lambda coefficients to save.",
+                )
+                return
+
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save lambda coefficients",
+                "lambda_coefficients.txt",
+                "Text files (*.txt);;CSV files (*.csv);;All files (*)",
+            )
+
+            if not path:
+                return
+
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("# Lambda coefficients\n")
+                file.write(
+                    "# Columns: parameter\tpair\tk\tvalue\tmin\tmax\trefine\n"
+                )
+
+                for pair in sorted(
+                    self._data.keys(),
+                    key=lambda value: str(value).lower(),
+                ):
+                    kmap = self._data.get(pair, {}) or {}
+
+                    for k in sorted(kmap.keys()):
+                        data = kmap.get(k, {}) or {}
+
+                        parameter_name = self._format_name(
+                            pair,
+                            int(k),
+                        )
+
+                        value = data.get(
+                            "value",
+                            "",
+                        )
+
+                        minimum = data.get(
+                            "min",
+                            "",
+                        )
+
+                        maximum = data.get(
+                            "max",
+                            "",
+                        )
+
+                        refine = bool(
+                            data.get(
+                                "refine",
+                                False,
+                            )
+                        )
+
+                        pair_text = (
+                            "global"
+                            if pair == self._PAIR_LEGACY
+                            else str(pair)
+                        )
+
+                        file.write(
+                            f"{parameter_name}\t"
+                            f"{pair_text}\t"
+                            f"{int(k)}\t"
+                            f"{value}\t"
+                            f"{minimum}\t"
+                            f"{maximum}\t"
+                            f"{'true' if refine else 'false'}\n"
+                        )
+
+            QtWidgets.QMessageBox.information(
+                self,
+                "Lambda coefficients saved",
+                f"Saved lambda coefficients to:\n{path}",
+            )
+
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Save lambda coefficients failed",
+                str(exc),
+            )
+            
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
