@@ -5,7 +5,7 @@ All notable changes to HKL-PDF are documented in this file.
 The project follows the principles of
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.2.0 — 2026-11-23
 
 ### Added
 

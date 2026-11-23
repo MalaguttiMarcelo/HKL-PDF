@@ -5,6 +5,15 @@ distribution function data, $G(r)$, using crystallographic structures,
 crystallite-size models, microstrain models, and optional
 missing-low-$Q$/SAXS baseline modelling.
 
+## Download
+
+**Windows:** [download the installer from the latest release](https://github.com/MalaguttiMarcelo/HKL-PDF/releases/latest)
+(`HKL-PDF-Setup-<version>.exe` under *Assets*), double-click it, and follow
+the steps. No Python, terminal, or administrator rights are needed. See
+[Option 1](#option-1-windows-installer) below for details.
+
+Linux and macOS: [install from the Python source](#option-2-install-from-python-source).
+
 > [!IMPORTANT]
 > HKL-PDF is early-stage research software. Validate fitted parameters,
 > residuals, parameter correlations, and physical assumptions independently
