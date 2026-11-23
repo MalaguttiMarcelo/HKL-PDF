@@ -125,11 +125,8 @@ This prevents incompatible old caches from being loaded.
 pytest
 ```
 
-The maintained tests are in `tests/`. They cover multi-phase projects,
-saved results, shell directions, ADPs, esds, and the width analysis.
-
-The older tests in `pdf_fitting/test/` target an earlier stacking API and
-are not part of the default test run.
+The tests are in `tests/`. They cover multi-phase projects, saved
+results, shell directions, ADPs, esds, and the width analysis.
 
 ## Formatting
 

@@ -114,3 +114,13 @@ gui_timing.jsonl
 
 # Structure-viewer state files (hold absolute paths; regenerated)
 examples/**/*.structure-view.json
+
+# Local files not published
+/pdf_fitting - Copy/
+/pdf_fitting/test/
+*.pptx
+*.pptm
+*.docx
+*.pyproj
+*.pyproj.bak
+*.sln
