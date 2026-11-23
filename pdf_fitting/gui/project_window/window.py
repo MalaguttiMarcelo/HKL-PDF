@@ -1,9 +1,10 @@
 """
 Main window for multi-dataset, multi-phase projects.
 
-Layout: toolbar and status chips on top with a small progress window at the
-top right (Rwp and weight fractions vs. iteration, common to all phases);
-below it the project tree on the left and the editor of the selected node.
+Layout: one compact row with the toolbar and status chips on top; below it
+the project tree on the left and the editor of the selected node. The first
+tree node, "Refinement progress", holds the Rwp and weight-fraction plots
+(common to all phases); the window switches to it when a refinement starts.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import sys
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -50,23 +52,21 @@ class ProgressCanvas(QtWidgets.QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("card")
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(520)
-        self.setFixedHeight(168)
+        self.setMinimumHeight(420)
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(2)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
         top = QtWidgets.QHBoxLayout()
-        t = QtWidgets.QLabel("Refinement progress · all phases")
-        t.setObjectName("cardTitle")
-        top.addWidget(t)
-        top.addStretch(1)
+        self.lbl_info = QtWidgets.QLabel("No refinement in this session yet. Press Refine (F6): the progress appears here.")
+        self.lbl_info.setObjectName("muted")
+        top.addWidget(self.lbl_info, 1)
+        top.addWidget(QtWidgets.QLabel("Weight fractions of"))
         self.combo_ds = QtWidgets.QComboBox()
         self.combo_ds.setToolTip("Dataset whose phase fractions are shown")
         self.combo_ds.currentIndexChanged.connect(lambda _i: self.redraw())
         top.addWidget(self.combo_ds)
         lay.addLayout(top)
-        self.fig = Figure(figsize=(5, 1.4), constrained_layout=True)
+        self.fig = Figure(figsize=(9, 4), constrained_layout=True)
         self.canvas = FigureCanvas(self.fig)
         lay.addWidget(self.canvas, 1)
         self.ax_rwp = self.fig.add_subplot(1, 2, 1)
@@ -104,25 +104,35 @@ class ProgressCanvas(QtWidgets.QFrame):
         for ax in (self.ax_rwp, self.ax_frac):
             ax.clear()
             ax.set_facecolor(t["base"])
-            ax.tick_params(labelsize=7, colors=t["muted"])
+            ax.tick_params(labelsize=9, colors=t["muted"])
+            ax.set_xlabel("Function evaluation", fontsize=9, color=t["muted"])
             for spine in ax.spines.values():
                 spine.set_color(t["border"])
-        self.ax_rwp.set_title("Rwp (%)", fontsize=8, color=t["text"])
-        self.ax_frac.set_title("Weight fraction (%)", fontsize=8, color=t["text"])
+        self.ax_rwp.set_title("Best Rwp (%)", fontsize=11, color=t["text"])
+        self.ax_frac.set_title("Weight fraction (%)", fontsize=11, color=t["text"])
         if self.rwp:
             x, y = zip(*self.rwp)
-            self.ax_rwp.plot(x, y, color="#1d4ed8", lw=1.2)
-            self.ax_rwp.text(0.98, 0.9, f"{y[-1]:.2f}", transform=self.ax_rwp.transAxes, ha="right", fontsize=8, color=t["text"])
+            self.ax_rwp.plot(x, y, color="#1d4ed8", lw=1.6)
+            self.ax_rwp.text(0.98, 0.92, f"{y[-1]:.2f} %", transform=self.ax_rwp.transAxes, ha="right", fontsize=12, fontweight="bold", color=t["text"])
+            self.lbl_info.setText(f"Start {y[0]:.2f} %  →  best {min(y):.2f} %  after {x[-1]} evaluations")
         ds_id = self.combo_ds.currentData()
         order = getattr(self, "_order", {}).get(ds_id, [])
         for pid, pts in (self.frac.get(ds_id) or {}).items():
             i = order.index(pid) if pid in order else 0
             x, y = zip(*pts)
-            self.ax_frac.plot(x, y, color=P.phase_color(i), lw=1.2, label=self.names.get(ds_id, {}).get(pid, pid))
+            self.ax_frac.plot(x, y, color=P.phase_color(i), lw=1.6, label=self.names.get(ds_id, {}).get(pid, pid))
         if self.frac.get(ds_id):
-            self.ax_frac.legend(fontsize=6, loc="best")
+            self.ax_frac.legend(fontsize=9, loc="best")
             self.ax_frac.set_ylim(-2, 102)
         self.canvas.draw_idle()
+
+
+class ProgressPanel(P.Panel):
+    """Rwp and weight fractions during a refinement (top node of the tree)."""
+
+    def __init__(self, canvas: ProgressCanvas, parent=None):
+        super().__init__(parent)
+        self.lay.addWidget(canvas, 1)
 
 
 class ProjectWindow(QtWidgets.QMainWindow):
@@ -171,32 +181,30 @@ class ProjectWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Header: toolbar + chips (left), progress window (right).
+        # Header: one compact row (name, toolbar, status chips). The
+        # refinement progress plots live in the tree ("Refinement progress").
         header = QtWidgets.QWidget()
         header.setObjectName("header")
         hl = QtWidgets.QHBoxLayout(header)
-        hl.setContentsMargins(12, 8, 12, 8)
-        left = QtWidgets.QVBoxLayout()
-        left.setSpacing(6)
-        title_row = QtWidgets.QHBoxLayout()
+        hl.setContentsMargins(10, 4, 10, 4)
+        hl.setSpacing(8)
         logo = QtWidgets.QLabel("PDF")
-        logo.setFixedSize(28, 28)
+        logo.setFixedSize(26, 26)
         logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet("background:#1d4ed8;color:white;border-radius:6px;font-weight:700;font-size:11px;")
-        title_row.addWidget(logo)
+        logo.setStyleSheet("background:#1d4ed8;color:white;border-radius:6px;font-weight:700;font-size:10px;")
+        hl.addWidget(logo)
         app_lbl = QtWidgets.QLabel(APP_NAME)
-        app_lbl.setStyleSheet("font-weight:700;font-size:15px;")
-        title_row.addWidget(app_lbl)
+        app_lbl.setStyleSheet("font-weight:700;font-size:14px;")
+        hl.addWidget(app_lbl)
         self.lbl_project = QtWidgets.QLabel()
         self.lbl_project.setObjectName("muted")
-        title_row.addWidget(self.lbl_project)
-        title_row.addStretch(1)
-        left.addLayout(title_row)
+        hl.addWidget(self.lbl_project)
 
         self.toolbar = QtWidgets.QToolBar()
         self.toolbar.setIconSize(QtCore.QSize(16, 16))
         self.toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         st = self.style()
+        # Open / Save stay in the File menu (Ctrl+O, Ctrl+S), not the toolbar.
         self.act_open = self._action("Open…", self.open_project, QtGui.QKeySequence.Open, st.standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
         self.act_save = self._action("Save", self.save_project, QtGui.QKeySequence.Save, st.standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         self.act_save_as = self._action("Save as…", self.save_project_as, QtGui.QKeySequence.SaveAs)
@@ -207,9 +215,6 @@ class ProjectWindow(QtWidgets.QMainWindow):
         self.act_refine = self._action("Refine", self.refine, "F6", st.standardIcon(QtWidgets.QStyle.SP_MediaPlay))
         self.act_stop = self._action("Stop", self.stop, "Esc", st.standardIcon(QtWidgets.QStyle.SP_MediaStop))
         self.act_stop.setEnabled(False)
-        for a in (self.act_open, self.act_save):
-            self.toolbar.addAction(a)
-        self.toolbar.addSeparator()
         for a in (self.act_add_ds, self.act_add_ph, self.act_import_ph):
             self.toolbar.addAction(a)
         self.toolbar.addSeparator()
@@ -219,9 +224,8 @@ class ProjectWindow(QtWidgets.QMainWindow):
         # can always be maximized, whatever the screen size.
         self.toolbar.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.toolbar.setMinimumWidth(160)
-        left.addWidget(self.toolbar)
+        hl.addWidget(self.toolbar, 1)
 
-        chips = QtWidgets.QHBoxLayout()
         self.chip_state = QtWidgets.QLabel("Ready")
         self.chip_state.setObjectName("chip")
         self.chip_rwp = QtWidgets.QLabel("Rwp —")
@@ -230,18 +234,14 @@ class ProjectWindow(QtWidgets.QMainWindow):
         self.chip_refined.setObjectName("chip")
         self.chip_backend = QtWidgets.QLabel()
         self.chip_backend.setObjectName("chip")
-        for c in (self.chip_state, self.chip_rwp, self.chip_refined, self.chip_backend):
-            chips.addWidget(c)
         # Chips keep their natural size but may shrink (never below 40 px)
         # so the window can still be maximized on small screens.
         for w in (self.chip_state, self.chip_rwp, self.chip_refined, self.chip_backend, self.lbl_project):
             w.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Maximum)
             w.setMinimumWidth(40)
-        chips.addStretch(1)
-        left.addLayout(chips)
-        hl.addLayout(left, 1)
+        for c in (self.chip_state, self.chip_rwp, self.chip_refined, self.chip_backend):
+            hl.addWidget(c)
         self.progress_canvas = ProgressCanvas()
-        hl.addWidget(self.progress_canvas)
         root.addWidget(header)
 
         # Body: tree | editor
@@ -292,6 +292,7 @@ class ProjectWindow(QtWidgets.QMainWindow):
         root.addWidget(split, 1)
 
         self.panels: Dict[str, P.Panel] = {
+            "progress": ProgressPanel(self.progress_canvas),
             "settings": P.SettingsPanel(),
             "constraints": P.ConstraintsPanel(),
             "refined": P.RefinedPanel(),
@@ -319,12 +320,49 @@ class ProjectWindow(QtWidgets.QMainWindow):
             panel.navigate.connect(self.select_node)
             # Every page scrolls, so no page can push the window's minimum
             # size beyond the screen.
-            page = scroll_page(panel) if key not in ("refined", "constraints") else panel
+            # (A page without one — e.g. Refined parameters with its
+            # correlation map, ~790 px — made the whole window taller than
+            # a 1080p screen: it could not be maximized and the bottom was cut.)
+            page = scroll_page(panel)
             self._pages[key] = page
             self.stack.addWidget(page)
 
         self._build_menus()
         self.statusBar().showMessage("Ready")
+
+    # ---- background mode (see gui/resident.py) ----------------------------
+
+    def _controller(self):
+        return getattr(QtWidgets.QApplication.instance(), "_hklpdf_controller", None)
+
+    def _toggle_keep_loaded(self, on: bool):
+        from pdf_fitting.gui import resident
+
+        resident.set_keep_loaded(on)
+        if self._controller() is not None:
+            self._controller().sync_menu()
+
+    def _toggle_login(self, on: bool):
+        from pdf_fitting.gui import resident
+
+        try:
+            resident.set_start_at_login(on)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "HKL-PDF", f"Could not change the login setting:\n{exc}")
+        if self._controller() is not None:
+            self._controller().sync_menu()
+
+    def _gpu_support(self):
+        from pdf_fitting.gui.gpu_dialog import run_gpu_install_dialog
+
+        run_gpu_install_dialog(self)
+
+    def _quit_all(self):
+        ctl = self._controller()
+        if ctl is not None:
+            ctl.quit_all()
+        else:
+            self.close()
 
     def _action(self, text, slot, shortcut=None, icon=None):
         act = QtGui.QAction(text, self)
@@ -343,7 +381,26 @@ class ProjectWindow(QtWidgets.QMainWindow):
         m.addAction(self.act_save)
         m.addAction(self.act_save_as)
         m.addSeparator()
-        m.addAction(self._action("Quit", self.close, QtGui.QKeySequence.Quit))
+        from pdf_fitting.gui import resident
+
+        self.act_keep_loaded = m.addAction("Keep HKL-PDF loaded after closing (faster start)")
+        self.act_keep_loaded.setCheckable(True)
+        self.act_keep_loaded.setChecked(resident.keep_loaded())
+        self.act_keep_loaded.setToolTip("Closing the window leaves HKL-PDF in the tray, so the next start takes about a second.")
+        self.act_keep_loaded.toggled.connect(self._toggle_keep_loaded)
+        self.act_login = m.addAction("Start HKL-PDF at Windows login")
+        self.act_login.setCheckable(True)
+        self.act_login.setChecked(resident.start_at_login())
+        self.act_login.setEnabled(sys.platform == "win32")
+        self.act_login.toggled.connect(self._toggle_login)
+        from pdf_fitting import gpu_install
+
+        if not gpu_install.cupy_available_natively():
+            m.addSeparator()
+            m.addAction(self._action("NVIDIA GPU support…", self._gpu_support))
+        m.addSeparator()
+        m.addAction(self._action("Close window", self.close, QtGui.QKeySequence.Close))
+        m.addAction(self._action("Quit HKL-PDF", self._quit_all, QtGui.QKeySequence.Quit))
         m = mb.addMenu("&Project")
         for a in (self.act_add_ds, self.act_add_ph, self.act_import_ph):
             m.addAction(a)
@@ -470,6 +527,12 @@ class ProjectWindow(QtWidgets.QMainWindow):
                 parent.addChild(item)
             return item
 
+        prog = add(None, "Refinement progress", "progress", bold=True, color=tokens()["accent"])
+        prog.setText(1, getattr(self, "_progress_rwp_text", ""))
+        prog.setForeground(0, QtGui.QColor(tokens()["accent"]))
+        prog.setToolTip(0, "Rwp and weight fractions while refining. The window switches here when you press Refine.")
+        self._progress_item = prog
+        self._set_progress_marker(getattr(self, "_refining", False), getattr(self, "_progress_rwp_text", ""))
         add(None, "Refinement settings", "settings")
         add(None, "Constraints", "constraints", len(self.project.constraints))
         add(None, "Refined parameters", "refined",
@@ -578,6 +641,7 @@ class ProjectWindow(QtWidgets.QMainWindow):
         self.stack.setCurrentWidget(self._pages[key])
 
         titles = {
+            "progress": ("Refinement progress", "Best Rwp and phase weight fractions against function evaluations, for the whole project."),
             "settings": ("Refinement settings", "Strategy, tolerances and compute backend for the whole project."),
             "constraints": ("Constraints", "Tie parameters within a phase, across phases or across datasets."),
             "refined": ("Refined parameters", "Every parameter flagged for refinement, in all datasets and phases."),
@@ -913,6 +977,10 @@ class ProjectWindow(QtWidgets.QMainWindow):
             self.history = []
             self.progress_canvas.reset()
             self.progress_canvas.set_datasets(self.project)
+            self.progress_canvas.lbl_info.setText("Refinement started…")
+            self._set_progress_marker(True, "…")
+            if not auto:
+                self.select_node("progress")
         self._thread = QtCore.QThread(self)
         self._worker = ProjectWorker(self.project, mode)
         self._worker.moveToThread(self._thread)
@@ -999,9 +1067,28 @@ class ProjectWindow(QtWidgets.QMainWindow):
         rwp = payload.get("best_rwp", np.nan)
         if rwp == rwp:
             self.chip_rwp.setText(f"Rwp {rwp:.2f} %")
+            self._set_progress_marker(True, f"{rwp:.2f} %")
+
+    def _set_progress_marker(self, running: bool, text: str = ""):
+        """Live Rwp beside the "Refinement progress" node, highlighted while refining."""
+        self._refining = running
+        self._progress_rwp_text = text
+        item = getattr(self, "_progress_item", None)
+        if item is None:
+            return
+        try:
+            item.setText(1, text)
+            brush = QtGui.QBrush(QtGui.QColor(tokens()["accent"]).lighter(180)) if running else QtGui.QBrush()
+            item.setBackground(0, brush)
+            item.setBackground(1, brush)
+        except RuntimeError:  # item deleted by a tree rebuild
+            self._progress_item = None
 
     def _on_finished(self, summary: Dict[str, Any]):
         rwp = summary.get("rwp", np.nan)
+        if summary.get("mode") == "refine":
+            self._set_progress_marker(False, f"{rwp:.2f} %" if rwp == rwp else "")
+            self.progress_canvas.redraw()
         self.chip_rwp.setText(f"Rwp {rwp:.2f} %" if rwp == rwp else "Rwp —")
         if summary.get("mode") == "refine":
             # Show the final fit first, so the user can judge it.
@@ -1113,6 +1200,8 @@ class ProjectWindow(QtWidgets.QMainWindow):
         self._thread = None
         self._worker = None
         self._set_running(False)
+        if getattr(self, "_refining", False):  # failed or stopped without a summary
+            self._set_progress_marker(False, getattr(self, "_progress_rwp_text", "").replace("…", ""))
 
     # ------------------------------------------------------------------
     # Classic hosts (plots with tick markers, output tabs, shape builder)

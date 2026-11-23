@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pdf_fitting.gui.timing import timing_print
+
 import time
 import traceback
 from typing import Optional, Dict, Any, List, Tuple
@@ -367,7 +369,7 @@ class FitWorker(QtCore.QThread):
                     G_ab = contrib_results.get("G_ab", {}) or {}
 
                     
-                    print(
+                    timing_print(
                         f"[FINAL TIMING] pair contributions: "
                         f"{time.perf_counter() - t_pair:.3f} s"
                     )
@@ -403,7 +405,7 @@ class FitWorker(QtCore.QThread):
                         if ok_keys:
                             warren_by_dir = w
 
-                    print(
+                    timing_print(
                         f"[FINAL TIMING] Warren plot: "
                         f"{time.perf_counter() - t_warren:.3f} s"
                     )
@@ -430,7 +432,7 @@ class FitWorker(QtCore.QThread):
                         max_r_plot=10.0,
                     )
 
-                    print(
+                    timing_print(
                         f"[FINAL TIMING] local trends up to 10 Å: "
                         f"{time.perf_counter() - t_local:.3f} s"
                     )
@@ -443,7 +445,7 @@ class FitWorker(QtCore.QThread):
             # Tick markers are calculated on demand when the user enables the Tick markers checkbox.
             tick_data = {}
 
-            print(
+            timing_print(
                 f"[FINAL TIMING] total final outputs: "
                 f"{time.perf_counter() - t_final:.3f} s"
             )

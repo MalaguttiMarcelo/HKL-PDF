@@ -135,6 +135,57 @@ ruff check .
 ruff format .
 ```
 
+## Building the Windows installer
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```
+
+Requirements: Python 3.14 (`py -3.14`) and Inno Setup 6. Build on a local
+disk; the script uses `%LOCALAPPDATA%\HKL-PDF-build` by default.
+
+| File | Role |
+|---|---|
+| `installer/requirements-build.txt` | Pinned package versions of the build environment |
+| `HKL-PDF.spec` | PyInstaller folder build; bundles only imported modules |
+| `launcher.py` | Entry point of the executable; sets the cache folders |
+| `installer/build.ps1` | Environment → GPU manifest → PyInstaller → remove CUDA → warm-up test → installer |
+| `installer/make_gpu_manifest.py` | Writes `pdf_fitting/gpu_packages.json` (wheel URLs, sizes, SHA-256) from the pinned versions |
+| `installer/HKL-PDF.iss` | Inno Setup script: per-user install, optional GPU download task |
+| `pdf_fitting/gpu_install.py` | Downloads, checks, unpacks and activates the GPU wheels; `check()` GPU test |
+
+Notes:
+
+- `pdf_fitting` is bundled as `.py` files, because Numba's on-disk kernel
+  cache needs the source files.
+- No CUDA library is shipped. CuPy is analysed during the build (so the
+  standard-library modules it needs are bundled) and then removed. On
+  request (`--install-gpu`, the installer task, or **File › NVIDIA GPU
+  support…**) the wheels listed in `gpu_packages.json` are downloaded from
+  PyPI, checked against their SHA-256, and unpacked into
+  `%LOCALAPPDATA%\HKL-PDF\gpu\<python tag>`. That folder is put on
+  `sys.path` at start-up. Only CuPy, `cuda-pathfinder`, the CUDA runtime,
+  NVRTC and cuBLAS are downloaded (about 730 MB); cuSPARSE, cuSOLVER,
+  cuFFT and cuRAND are not used.
+- The wheels must match the program's Python version (`cp314`).
+  `make_gpu_manifest.py` uses the build environment's Python.
+- `HKL-PDF.exe --gpu-check` tests the GPU support (exit code 0 = works).
+- `HKL-PDF.exe --warmup` evaluates two bundled examples to fill the Numba
+  cache. The installer runs it, and the build script uses it as a smoke
+  test.
+- Regenerate `requirements-build.txt` from the tested development
+  environment (`pip freeze`) when upgrading packages.
+
+## Start-up and background mode
+
+- `gui/splash.py` imports every heavy library behind a loading screen
+  before the main window opens.
+- `gui/resident.py` keeps one HKL-PDF process per user (local socket). A
+  second start hands its request to the running copy and exits. With
+  **Keep HKL-PDF loaded after closing** (default on), closing the last
+  window leaves the process in the tray. `--background` (used by **Start at
+  Windows login**, default off) loads without a window.
+
 ## Build
 
 ```bash

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hkl-pdf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Graphical pair distribution function fitting and crystallite-shape analysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,6 +63,9 @@ dev = [
 
 [project.scripts]
 hkl-pdf = "pdf_fitting.gui.main:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "pdf_fitting.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

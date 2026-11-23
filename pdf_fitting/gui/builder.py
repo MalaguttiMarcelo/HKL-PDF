@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pdf_fitting.gui.timing import timing_print
+
 import json
 import os
 import re
@@ -3235,7 +3237,7 @@ class InputBuilder(QtWidgets.QWidget):
 
             return
 
-        print(
+        timing_print(
             "[BUILDER TIMING] Lightweight structure metadata: "
             f"{time.perf_counter() - metadata_start:.3f} s "
             f"(cache_hit={metadata.get('cache_hit', False)})"
@@ -5002,7 +5004,7 @@ class InputBuilder(QtWidgets.QWidget):
                 structure_path
             )
 
-            print(
+            timing_print(
                 "[BUILDER TIMING] Structure metadata and GUI tables: "
                 f"{time.perf_counter() - load_start:.3f} s"
             )

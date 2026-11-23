@@ -1,5 +1,27 @@
 # Installation
 
+## Windows installer
+
+The simplest way on Windows is the installer from the
+[Releases page](https://github.com/MalaguttiMarcelo/HKL-PDF/releases):
+
+1. Download and run `HKL-PDF-Setup-<version>.exe`. No administrator rights
+   are needed; HKL-PDF is installed for the current user in
+   `%LOCALAPPDATA%\Programs\HKL-PDF`.
+2. Only on computers with an NVIDIA graphics card: tick **Download and
+   install NVIDIA GPU support** (about 700 MB from the Python Package
+   Index). It can also be added later with **File › NVIDIA GPU support…**.
+3. The installer prepares the numerical kernels at the end (about a
+   minute).
+
+Messages of the installed program are written to
+`%LOCALAPPDATA%\HKL-PDF\hkl-pdf.log`. Attach this file to bug reports.
+
+To build the installer yourself, see
+[Building the installer](developer-guide.md#building-the-windows-installer).
+
+The rest of this page describes installation from the Python source.
+
 ## Requirements
 
 HKL-PDF requires Python 3.10 or newer.

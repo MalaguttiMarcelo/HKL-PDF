@@ -7,6 +7,18 @@ AMD GPUs are not supported yet.
 
 ## Installing GPU support
 
+### Installed program (Windows installer)
+
+1. Install a recent NVIDIA driver.
+2. Tick **Download and install NVIDIA GPU support** in the installer, or
+   later use **File › NVIDIA GPU support…** in HKL-PDF. It downloads CuPy and
+   the CUDA runtime, NVRTC and cuBLAS (about 700 MB) from the Python Package
+   Index into `%LOCALAPPDATA%\HKL-PDF\gpu`. Every file is checked against a
+   pinned checksum. No administrator rights are needed.
+3. At the end, a short GPU test reports the graphics card that was found.
+
+### Python source installation
+
 1. Install a recent NVIDIA driver.
 2. Install the CuPy build that matches your CUDA version, for example:
 
@@ -93,10 +105,19 @@ ignored and rebuilt. They can be deleted safely at any time.
 
 ## Start-up
 
-The project window loads heavy libraries (VTK, CuPy, the stacking models)
-in the background shortly after it opens. The first **Calculate** or the
-first **Structure (3D)** view is therefore faster. Importing CuPy can take
-several seconds on network drives.
+HKL-PDF shows a loading screen while it imports every heavy library (NumPy,
+SciPy, Numba, pandas, Matplotlib, pymatgen, VTK, PyVista, CuPy when
+installed, and its own models). The bottom line of the screen names the
+library being loaded. After that, Calculate, Structure (3D), and GPU
+calculations start without further imports.
+
+Start-up time depends mostly on where Python and its packages are
+installed. From a network drive they can take more than a minute, because
+every import reads thousands of small files; a local disk is much faster. Install Python and the virtual environment on a
+local disk when possible.
+
+Set `PDF_FITTING_TIMING=1` to print detailed timing information to the
+terminal (for debugging).
 
 ## Tips
 

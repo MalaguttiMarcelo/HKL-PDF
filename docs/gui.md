@@ -13,34 +13,59 @@ python -m pdf_fitting.gui --classic          # classic single-phase window
 
 The classic window can also be opened from **View › Classic window**.
 
+## Start-up and background mode
+
+A loading screen shows which library is being loaded. All heavy libraries
+are imported before the main window opens, so later actions do not wait.
+
+By default, closing the window keeps HKL-PDF loaded in the background,
+with a tray icon near the clock. The next start, including double-clicking
+a project, opens a window in about a second. HKL-PDF stays loaded until
+**File › Quit HKL-PDF** (or **Quit HKL-PDF** in the tray-icon menu) or a
+restart of the computer.
+
+| Option (File menu and tray menu) | Default |
+|---|---|
+| Keep HKL-PDF loaded after closing | on |
+| Start HKL-PDF at Windows login | off |
+
+**File › Close window** closes only the window; **File › Quit HKL-PDF**
+also unloads the program.
+
 ## Layout
 
 ```text
-┌──────────────────────────────────────────────────────────┬──────────────┐
-│ Toolbar: Open · Save · +Dataset · +Phase · Calculate ·   │  Rwp and     │
-│          Refine · Stop                                    │  phase       │
-│ Chips:   state · Rwp · refined count · CPU/GPU backends  │  fractions   │
-├──────────────────────┬───────────────────────────────────┴──────────────┤
+┌─────────────────────────────────────────────────────────────────────────┐
+│ HKL-PDF · project │ +Dataset · +Phase · Calculate · Refine · Stop │ chips│
+├──────────────────────┬──────────────────────────────────────────────────┤
 │ Project tree         │ Editor page for the selected tree node           │
 │                      │                                                  │
 └──────────────────────┴──────────────────────────────────────────────────┘
 ```
 
-- The **toolbar** holds the project and calculation actions.
-  Shortcuts: **F5** Calculate, **F6** Refine, **Esc** Stop, **Ctrl+S** Save.
+- The **toolbar** holds the dataset, phase, and calculation actions.
+  **Open** and **Save** are in the **File** menu.
+  Shortcuts: **F5** Calculate, **F6** Refine, **Esc** Stop, **Ctrl+O** Open,
+  **Ctrl+S** Save.
 - The **chips** show the worker state, the current $R_\mathrm{wp}$, the
   number of parameters flagged for refinement, and the selected shell and
   PDF backends (CPU or CUDA).
-- The **progress panel** at the top right plots $R_\mathrm{wp}$ and the
-  phase weight fractions against the function-evaluation count. It is
-  shared by all phases.
 - The **project tree** on the left selects the editor page on the right.
   The number beside a node is the count of parameters flagged for
   refinement below it.
 
+## Refinement progress
+
+The first node of the tree, **Refinement progress**, plots the best
+$R_\mathrm{wp}$ and the phase weight fractions against the
+function-evaluation count, for all phases. When **Refine** is pressed, the
+window switches to this page. The node is highlighted while the refinement
+runs and shows the current $R_\mathrm{wp}$ beside it.
+
 ## Project tree
 
 ```text
+Refinement progress
 Refinement settings
 Constraints
 Refined parameters

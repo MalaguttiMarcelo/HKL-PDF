@@ -69,79 +69,47 @@ There are two ways to use HKL-PDF:
 1. run the prebuilt Windows executable;
 2. install and run the Python source code.
 
-## Option 1: Windows executable
-
-The prebuilt executable does not require the user to install Python or the
-Python dependencies separately.
-
-### From a GitHub release
-
-The recommended method is:
+## Option 1: Windows installer
 
 1. Open the
    [HKL-PDF Releases page](https://github.com/MalaguttiMarcelo/HKL-PDF/releases).
-2. Open the latest release.
-3. Download the Windows executable or release archive.
-4. If an archive was downloaded, extract it to a writable folder.
-5. Double-click `HKL-PDF.exe`.
+2. Download `HKL-PDF-Setup-<version>.exe` from the latest release.
+3. Run it. No administrator rights are needed: HKL-PDF is installed for the
+   current user in `%LOCALAPPDATA%\Programs\HKL-PDF` (an "all users"
+   installation can be chosen instead).
+4. Only on computers with an NVIDIA graphics card: tick **Download and
+   install NVIDIA GPU support**. The installer then downloads CuPy and the
+   needed CUDA libraries (about 700 MB) from the Python Package Index. GPU
+   support can also be added later with **File › NVIDIA GPU support…** in
+   HKL-PDF.
+5. At the end, the installer prepares the numerical kernels (about a
+   minute), so the first calculation is not slowed down.
 
-Do not run the executable directly from inside a ZIP archive. Extract all
-files first so that any required bundled libraries remain beside the
-executable.
-
-### From a cloned repository
-
-If the compiled `dist` directory is included in the repository, clone it:
-
-```bash
-git clone https://github.com/MalaguttiMarcelo/HKL-PDF.git
-cd HKL-PDF
-```
-
-Then open the `dist` directory and double-click:
-
-```text
-HKL-PDF.exe
-```
-
-Depending on the PyInstaller build format, the executable may instead be
-located at:
-
-```text
-dist/HKL-PDF/HKL-PDF.exe
-```
-
-From Windows PowerShell, it can be started with one of the following commands:
-
-```powershell
-.\dist\HKL-PDF.exe
-```
-
-or:
-
-```powershell
-.\dist\HKL-PDF\HKL-PDF.exe
-```
-
-Use the path that exists in the downloaded distribution.
-
-> [!NOTE]
-> The Windows executable only runs on Windows. Linux and macOS users should
-> install and run HKL-PDF from the Python source.
+Start HKL-PDF from the Start menu. The examples are reachable from the
+**HKL-PDF examples** Start-menu entry.
 
 ### Windows security warning
 
-Because the executable may not be digitally signed, Windows SmartScreen may
-display a warning.
+The installer is not digitally signed, so Windows SmartScreen may show a
+warning. Only continue if the file came from the official HKL-PDF GitHub
+repository: click **More info**, then **Run anyway**.
 
-Only continue if the executable was downloaded from the official HKL-PDF
-GitHub repository or its associated Zenodo release.
+### Fast start: keep HKL-PDF loaded
 
-If SmartScreen appears:
+Loading the scientific libraries takes time. By default, closing the HKL-PDF
+window keeps the program loaded in the background (tray icon near the
+clock), so the next start opens a window in about a second. It stays loaded
+until **Quit HKL-PDF** (File menu or tray icon) or a restart of the
+computer.
 
-1. click **More info**;
-2. verify that the file came from the official repository;
-3. click **Run anyway** if you trust the download.
+Both options are in the **File** menu and in the tray-icon menu:
+
+| Option | Default | Effect |
+|---|---|---|
+| Keep HKL-PDF loaded after closing | on | Closing the last window leaves HKL-PDF in the tray |
+| Start HKL-PDF at Windows login | off | Loads HKL-PDF in the background at login, so the first start after a restart is fast too |
+
+Keeping HKL-PDF loaded uses memory (roughly 0.5–1 GB) while it waits.
 
 ## Option 2: Install from Python source
 
@@ -315,34 +283,41 @@ edited_structures
 
 These generated caches do not need to be committed to Git.
 
-## Building the executable
+## Building the Windows installer
 
-The repository contains a PyInstaller specification file:
+The installer is built by one script, from a build environment on a local
+disk (building from a network drive is very slow):
 
-```text
-HKL-PDF.spec
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
-Install PyInstaller in the build environment:
+It needs Python 3.14 (`py -3.14`) and
+[Inno Setup 6](https://jrsoftware.org/isinfo.php). The script:
 
-```bash
-python -m pip install pyinstaller
+1. creates `%LOCALAPPDATA%\HKL-PDF-build\venv` with the pinned packages of
+   `installer/requirements-build.txt`;
+2. builds the program folder with PyInstaller (`HKL-PDF.spec`; a folder
+   build, not a single file, so nothing is unpacked at every start);
+3. removes CuPy and every CUDA library from the program folder (GPU
+   support is downloaded by the user on request; the list of exact files
+   and checksums is `pdf_fitting/gpu_packages.json`);
+4. checks the built program with `HKL-PDF.exe --warmup`;
+5. writes `installer-output/HKL-PDF-Setup-<version>.exe`.
+
+Options: `-Recreate` rebuilds the environment, `-NoInstaller` stops after
+the program folder, `-BuildRoot <dir>` changes the build folder, `-TestGpu`
+also downloads the GPU support and tests it with the built program.
+
+### Publishing a release
+
+Do not commit the installer. Attach it to a GitHub Release, where each file
+may be up to 2 GB (files committed to the repository are limited to
+100 MB). Create the release on GitHub, or with the GitHub CLI:
+
+```powershell
+gh release create v<version> installer-output\HKL-PDF-Setup-<version>.exe --title "HKL-PDF <version>" --notes-file docs\changelog.md
 ```
-
-Build the application from the repository root:
-
-```bash
-pyinstaller --clean HKL-PDF.spec
-```
-
-The generated executable or application directory will be written to:
-
-```text
-dist/
-```
-
-The exact layout depends on whether the PyInstaller specification creates a
-one-file or one-folder build.
 
 ## Troubleshooting
 

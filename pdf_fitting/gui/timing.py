@@ -17,10 +17,11 @@ from PySide6 import QtCore
 from PySide6 import QtWidgets
 
 
+# Debug instrumentation: off unless PDF_FITTING_TIMING=1 is set.
 TIMING_ENABLED = (
     os.environ.get(
         "PDF_FITTING_TIMING",
-        "1",
+        "0",
     ).strip().lower()
     in {
         "1",
@@ -87,6 +88,12 @@ TIMING_LOG_PATH = Path(
         ),
     )
 )
+
+
+def timing_print(*args, **kwargs) -> None:
+    """print() for timing messages: silent unless PDF_FITTING_TIMING=1."""
+    if TIMING_ENABLED:
+        print(*args, **kwargs)
 
 
 _thread_state = threading.local()
@@ -1164,6 +1171,9 @@ def install_timing_instrumentation() -> None:
 
 
 def instrument_structure_studio_if_loaded() -> None:
+    if not TIMING_ENABLED:
+        return
+
     module_name = (
         "pdf_fitting.gui.structure_studio.studio"
     )
@@ -1357,7 +1367,14 @@ class EventLoopLagMonitor(
 
 
 def enable_periodic_traceback_dump() -> None:
-    if TRACEBACK_DELAY_SECONDS <= 0.0:
+    # A hard crash always prints the Python tracebacks; the periodic dump of
+    # every thread is a debugging aid and only runs with timing enabled.
+    try:
+        faulthandler.enable()
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not TIMING_ENABLED or TRACEBACK_DELAY_SECONDS <= 0.0:
         return
 
     try:

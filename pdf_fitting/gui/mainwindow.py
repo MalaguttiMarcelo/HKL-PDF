@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pdf_fitting.gui.timing import timing_print
+
 import json
 import os
 import re
@@ -4860,7 +4862,7 @@ class MainWindow(QtWidgets.QMainWindow):
             apply_model_lattice_constraints_to_params,
         )
 
-        print(
+        timing_print(
             "[CALCULATE TIMING] Scientific imports: "
             f"{time.perf_counter() - import_start:.3f} s"
         )
@@ -4903,7 +4905,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             config_start = time.perf_counter()
 
-            print(
+            timing_print(
                 "[CALCULATE TIMING] Read configuration: "
                 f"{time.perf_counter() - config_start:.3f} s"
             )
@@ -4917,7 +4919,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 unpack=True,
             )
 
-            print(
+            timing_print(
                 "[CALCULATE TIMING] Load experimental data: "
                 f"{time.perf_counter() - data_start:.3f} s"
             )
@@ -5218,7 +5220,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     pair_cutoff,
                 )
 
-            print(
+            timing_print(
                 "[CALCULATE TIMING] Get/build model: "
                 f"{time.perf_counter() - model_start:.3f} s"
             )
@@ -5578,7 +5580,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-            print(
+            timing_print(
                 "[CALCULATE TIMING] Total button-to-result time: "
                 f"{time.perf_counter() - calculate_total_start:.3f} s"
             )

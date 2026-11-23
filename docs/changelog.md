@@ -32,7 +32,20 @@ The project follows the principles of
 - NVIDIA GPU (CuPy) evaluation of stacking models, including Wilkens and
   PAH microstrain.
 - Session and disk caches for compiled stacking topologies.
-- Background loading of heavy libraries after the window opens.
+- Loading screen that imports every heavy library before the main window
+  opens, and an application icon.
+- One running copy per user; a second start opens its window in the
+  running copy. Optional background mode keeps HKL-PDF loaded after the
+  last window closes (default on); optional start at Windows login (default
+  off).
+- Windows installer: per-user installation without administrator rights,
+  Numba kernels prepared during installation, and a one-step build script
+  (`installer/build.ps1`). NVIDIA GPU support is not shipped. It is
+  downloaded on request (installer option or **File › NVIDIA GPU
+  support…**), with pinned checksums.
+- Refinement progress plots moved to their own page at the top of the
+  project tree; compact one-row header.
+- Debug timing output is off unless `PDF_FITTING_TIMING=1` is set.
 - Finite-shape gamma and coordination export.
 - On-demand PDF tick-marker generation.
 - Element-grouped Biso controls for large structures.
